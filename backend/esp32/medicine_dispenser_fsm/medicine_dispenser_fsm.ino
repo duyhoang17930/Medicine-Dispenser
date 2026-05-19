@@ -6,11 +6,13 @@
 
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 // ==================== CẤU HÌNH ====================
 #define WIFI_SSID     "Rẹt"
 #define WIFI_PASSWORD "05012005"
-#define MQTT_SERVER   "172.20.10.2"
+#define MQTT_SERVER   "172.20.10.3"
 #define MQTT_PORT    1883
 #define MQTT_USERNAME ""
 #define MQTT_PASSWORD  ""
@@ -22,17 +24,17 @@
 #define IN1_A  26
 #define IN2_A  27
 #define IN3_A  14
-#define IN4_A  12
+#define IN4_A  13
 
 // ----- Stepper Motor 2 (Ngăn B) -----
 #define IN1_B  16
 #define IN2_B  17
-#define IN3_B  5
-#define IN4_B  18
+#define IN3_B  18
+#define IN4_B  19
 
-// ----- IR Sensors -----
-#define IR1_PIN   34
-#define IR2_PIN   35
+// ----- IR Sensors (Digital) -----
+#define IR1_PIN   35
+#define IR2_PIN   34
 
 // ----- Touch Sensor TTP224 -----
 #define TOUCH_PIN  36
@@ -41,11 +43,11 @@
 #define TOUCH_RST 3  // Nút 3: Reset hệ thống (tùy chọn)
 
 // ----- Thông số -----
-#define IR_THRESHOLD    2000
+#define IR_THRESHOLD    2800
 #define STEPS_PER_REV   2048  // 28BYJ-48 full revolution
-#define DISPENSE_STEPS  512  // Xoay 1/4 vòng = 8 khoang
-#define MOTOR_SPEED     5    // Delay per step (ms) - nhỏ = nhanh
-#define DISPENSE_TIMEOUT 3000 // Timeout chờ IR (ms)
+#define DISPENSE_STEPS  128  // Xoay 1/4 vòng = 8 khoang
+#define MOTOR_SPEED     3   // Delay per step (ms)
+#define DISPENSE_TIMEOUT 5000 // Timeout chờ IR (ms)
 
 // ==================== STATE MACHINE ====================
 enum State {
@@ -64,6 +66,14 @@ const char* stateNames[] = {
     "ERROR"
 };
 
+// Forward declarations
+void transitionTo(State newState);
+void fsmIdle();
+void fsmDispense();
+void fsmWaitSensor();
+void fsmSuccess();
+void fsmError();
+
 // ==================== BIẾN ====================
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
@@ -75,7 +85,13 @@ State previousState = STATE_IDLE;
 // Command data
 int currentSlot = 0;
 unsigned long stateStartTime = 0;
-bool irTriggered = false;
+volatile bool irTriggered = false;
+
+// Bien cho multitasking
+volatile bool isDispensing = false;
+volatile bool motorFinished = false;
+TaskHandle_t irTaskHandle = NULL;
+TaskHandle_t stepperTaskHandle = NULL;
 
 // IR values
 int ir1Value = 4095;
@@ -85,6 +101,15 @@ int ir2Value = 4095;
 bool touchPressed[4] = {false, false, false, false};
 int touchButtons[4] = {0};
 
+// ISR cho IR
+void IRAM_ATTR ir1ISR() {
+    irTriggered = true;
+}
+
+void IRAM_ATTR ir2ISR() {
+    irTriggered = true;
+}
+
 // ==================== SETUP ====================
 void setup() {
     Serial.begin(9600);
@@ -93,7 +118,7 @@ void setup() {
     // Init Stepper pins
     initStepperPins();
 
-    // Init IR pins
+    // Init IR pins - Digital (Poll mode, KO pullup)
     pinMode(IR1_PIN, INPUT);
     pinMode(IR2_PIN, INPUT);
 
@@ -108,6 +133,7 @@ void setup() {
     mqttClient.setCallback(mqttCallback);
 
     Serial.println("===== Setup Complete =====\n");
+    
 }
 
 void initStepperPins() {
@@ -136,8 +162,8 @@ void initStepperPins() {
 
 // ==================== LOOP ====================
 void loop() {
-    // Đọc cảm biến
-    readIRSensors();
+    // Đọc cảm biến (IR da digital, khong can analog)
+    // readIRSensors();
     readTouchSensor();
 
     // Kiểm tra MQTT
@@ -189,52 +215,145 @@ void fsmIdle() {
 }
 
 void fsmDispense() {
+    // Guard - neu dang dispensing thi bo qua
+    if (isDispensing) return;
+
     Serial.println("========================================");
     Serial.print("=> DISPENSE SLOT: ");
     Serial.println(currentSlot);
     Serial.println("========================================");
 
-    // Xoay stepper tương ứng
-    if (currentSlot == 1) {
-        rotateStepperA(DISPENSE_STEPS);
-        Serial.println("=> STEPPER A DISPENSED");
-    } else if (currentSlot == 2) {
-        rotateStepperB(DISPENSE_STEPS);
-        Serial.println("=> STEPPER B DISPENSED");
+    irTriggered = false;
+    motorFinished = false;
+    isDispensing = true;
+
+    // Start IR monitor task
+    xTaskCreatePinnedToCore(
+        irMonitorTask,
+        "IRTask",
+        2048,
+        NULL,
+        1,
+        &irTaskHandle,
+        0
+    );
+
+    // Start stepper task
+    xTaskCreatePinnedToCore(
+        stepperTask,
+        "StepperTask",
+        4096,
+        NULL,
+        1,
+        &stepperTaskHandle,
+        1
+    );
+
+    // Chuyen sang wait
+    stateStartTime = millis();
+    transitionTo(STATE_WAIT_SENSOR);
+}
+
+void irMonitorTask(void* parameter) {
+    Serial.println("[IR Task] Started");
+    while (isDispensing) {
+        // Doc IR lien tuc
+        int ir1 = digitalRead(IR1_PIN);
+        int ir2 = digitalRead(IR2_PIN);
+
+        // Kiem tra theo slot (che IR thi = 0)
+        bool detected = false;
+        if (currentSlot == 1) {
+            detected = (ir1 == 0);
+        } else if (currentSlot == 2) {
+            detected = (ir2 == 0);
+        }
+
+        // Detect ngay khi co Low (1 lan)
+        if (detected) {
+            irTriggered = true;
+            Serial.println("[IR] DETECTED!");
+            break;
+        }
+
+        vTaskDelay(1);
     }
 
-    Serial.println("=== Stepper done, waiting sensor ===");
+    Serial.println("[IR Task] Stopped");
+    vTaskDelete(NULL);
+}
 
-    // Chuyển sang chờ sensor
-    stateStartTime = millis();
-    irTriggered = false;
-    transitionTo(STATE_WAIT_SENSOR);
+// Task 2: Xu ly stepper
+void stepperTask(void* parameter) {
+    Serial.println("[Stepper Task] Started");
+
+    // Luu local copy de tranh bi thay doi
+    int slot = currentSlot;
+
+    if (slot == 1) {
+        // Quay nguoc 90 do
+        for (int i = 0; i < DISPENSE_STEPS && !irTriggered; i++) {
+            for (int step = 3; step >= 0 && !irTriggered; step--) {
+                setStepperA(step);
+                vTaskDelay(pdMS_TO_TICKS(MOTOR_SPEED));
+            }
+        }
+    } else if (slot == 2) {
+        for (int i = 0; i < DISPENSE_STEPS && !irTriggered; i++) {
+            for (int step = 0; step < 4 && !irTriggered; step++) {
+                setStepperB(step);
+                vTaskDelay(pdMS_TO_TICKS(MOTOR_SPEED));
+            }
+        }
+    }
+
+    // Tat dong co truoc khi quay ve
+    digitalWrite(IN1_A, LOW); digitalWrite(IN2_A, LOW);
+    digitalWrite(IN3_A, LOW); digitalWrite(IN4_A, LOW);
+    digitalWrite(IN1_B, LOW); digitalWrite(IN2_B, LOW);
+    digitalWrite(IN3_B, LOW); digitalWrite(IN4_B, LOW);
+
+    // Quay ve vi tri ban dau (ALWAYS)
+    vTaskDelay(pdMS_TO_TICKS(200));
+    if (slot == 1) {
+        for (int i = 0; i < DISPENSE_STEPS; i++) {
+            for (int step = 0; step < 4; step++) {
+                setStepperA(step);
+                vTaskDelay(pdMS_TO_TICKS(MOTOR_SPEED));
+            }
+        }
+    } else if (slot == 2) {
+        for (int i = 0; i < DISPENSE_STEPS; i++) {
+            for (int step = 3; step >= 0; step--) {
+                setStepperB(step);
+                vTaskDelay(pdMS_TO_TICKS(MOTOR_SPEED));
+            }
+        }
+    }
+
+    // Tat het dong co
+    digitalWrite(IN1_A, LOW); digitalWrite(IN2_A, LOW);
+    digitalWrite(IN3_A, LOW); digitalWrite(IN4_A, LOW);
+    digitalWrite(IN1_B, LOW); digitalWrite(IN2_B, LOW);
+    digitalWrite(IN3_B, LOW); digitalWrite(IN4_B, LOW);
+
+    // Danh dau da xong
+    isDispensing = false;
+    motorFinished = true;
+
+    Serial.println("[Stepper Task] Done");
+    vTaskDelete(NULL);
 }
 
 void fsmWaitSensor() {
     unsigned long elapsed = millis() - stateStartTime;
 
-    // Kiểm tra IR theo slot
-    bool detected = false;
-    if (currentSlot == 1) {
-        detected = (ir1Value < IR_THRESHOLD);
-    } else if (currentSlot == 2) {
-        detected = (ir2Value < IR_THRESHOLD);
-    }
-
-    Serial.print("IR1: ");
-    Serial.print(ir1Value);
-    Serial.print(" IR2: ");
-    Serial.print(ir2Value);
-    Serial.print(" Detected: ");
-    Serial.println(detected ? "YES" : "NO");
-
-    // Kết quả
-    if (detected) {
-        irTriggered = true;
+    // Chi bao SUCCESS khi Ca IR interrupt va Motor xong
+    if (irTriggered && motorFinished) {
+        isDispensing = false;
         transitionTo(STATE_SUCCESS);
     } else if (elapsed > DISPENSE_TIMEOUT) {
-        irTriggered = false;
+        isDispensing = false;
         transitionTo(STATE_ERROR);
     }
 }
@@ -282,14 +401,29 @@ void transitionTo(State newState) {
 // ==================== STEPPER MOTOR ====================
 
 void rotateStepperA(int steps) {
-    // 28BYJ-48 sequence (4-step)
+    // Xoay nguoc chieu 90 do
+    for (int i = 0; i < steps; i++) {
+        for (int step = 3; step >= 0; step--) {
+            setStepperA(step);
+            delay(MOTOR_SPEED);
+        }
+    }
+    // Tat dong co
+    digitalWrite(IN1_A, LOW);
+    digitalWrite(IN2_A, LOW);
+    digitalWrite(IN3_A, LOW);
+    digitalWrite(IN4_A, LOW);
+
+    delay(200); // Cho 200ms
+
+    // Quay ve vi tri ban dau (chieu thuan)
     for (int i = 0; i < steps; i++) {
         for (int step = 0; step < 4; step++) {
             setStepperA(step);
             delay(MOTOR_SPEED);
         }
     }
-    // Turn off
+    // Tat dong co
     digitalWrite(IN1_A, LOW);
     digitalWrite(IN2_A, LOW);
     digitalWrite(IN3_A, LOW);
@@ -297,12 +431,29 @@ void rotateStepperA(int steps) {
 }
 
 void rotateStepperB(int steps) {
+    // Xoay thuan 90 do
     for (int i = 0; i < steps; i++) {
         for (int step = 0; step < 4; step++) {
             setStepperB(step);
             delay(MOTOR_SPEED);
         }
     }
+    // Tat dong co
+    digitalWrite(IN1_B, LOW);
+    digitalWrite(IN2_B, LOW);
+    digitalWrite(IN3_B, LOW);
+    digitalWrite(IN4_B, LOW);
+
+    delay(200); // Cho 200ms
+
+    // Quay ve vi tri ban dau (nguoc chieu)
+    for (int i = 0; i < steps; i++) {
+        for (int step = 3; step >= 0; step--) {
+            setStepperB(step);
+            delay(MOTOR_SPEED);
+        }
+    }
+    // Tat dong co
     digitalWrite(IN1_B, LOW);
     digitalWrite(IN2_B, LOW);
     digitalWrite(IN3_B, LOW);
@@ -417,19 +568,30 @@ void mqttCallback(char* topic, byte* payload, unsigned int len) {
 
 void parseCommand(String msg) {
     int slotStart = msg.indexOf("\"slot\":");
+
     if (slotStart == -1) {
         slotStart = msg.indexOf("slot:");
     }
 
     if (slotStart != -1 && currentState == STATE_IDLE) {
+
         int numStart = msg.indexOf(":", slotStart) + 1;
-        while (msg[numStart] == ' ' || msg[numStart] == '"') numStart++;
+
+        while (msg[numStart] == ' ' || msg[numStart] == '"') {
+            numStart++;
+        }
 
         int slot = msg[numStart] - '0';
+
         if (slot == 1 || slot == 2) {
+
             currentSlot = slot;
+
             Serial.print("MQTT Command: Slot ");
             Serial.println(currentSlot);
+
+            // QUAN TRỌNG
+            transitionTo(STATE_DISPENSE);
         }
     }
 }
