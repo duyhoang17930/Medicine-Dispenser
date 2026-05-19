@@ -1,0 +1,8 @@
+{
+  "short_name": "Hộp Thuốc",
+  "name": "Hệ thống phát thuốc thông minh",
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#4CAF50",
+  "background_color": "#ffffff"
+}
