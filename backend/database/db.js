@@ -31,7 +31,7 @@ async function logMedicine(slot, status, message = null) {
 }
 
 async function getLogs(limit = 50) {
-    const sql = 'SELECT * FROM medicine_logs ORDER BY created_at DESC LIMIT ' + parseInt(limit);
+    const sql = 'SELECT id, slot, status, message,created_at AS time FROM medicine_logs ORDER BY created_at DESC LIMIT ' + parseInt(limit);
     return query(sql, []);
 }
 
@@ -45,11 +45,28 @@ async function getSystemStatus() {
     return query(sql);
 }
 
+async function getDailyStats() {
+    const sql = `
+        SELECT
+            DATE(created_at) as date,
+            SUM(CASE WHEN slot = 1 THEN 1 ELSE 0 END) as slot1,
+            SUM(CASE WHEN slot = 2 THEN 1 ELSE 0 END) as slot2,
+            COUNT(*) as total
+        FROM medicine_logs
+        WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+            AND status = 'success'
+        GROUP BY DATE(created_at)
+        ORDER BY date ASC
+    `;
+    return query(sql);
+}
+
 module.exports = {
     getPool,
     query,
     logMedicine,
     getLogs,
     updateSystemStatus,
-    getSystemStatus
+    getSystemStatus,
+    getDailyStats
 };

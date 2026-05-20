@@ -3,6 +3,41 @@ const router = express.Router();
 const mqttClient = require('../mqtt/mqttClient');
 const db = require('../database/db');
 
+// Voice API server URL
+const VOICE_API_URL = 'http://localhost:8765/record';
+
+// POST /api/medicine/listen - Nghe và nhận diện giọng nói
+router.post('/listen', async (req, res) => {
+    try {
+        // Call voice API server
+        const response = await fetch(VOICE_API_URL, {
+            method: 'POST'
+        });
+
+        const result = await response.json();
+
+        if (result.error) {
+            throw new Error(result.error);
+        }
+
+        // Publish to MQTT if slot detected
+        if (result.slot) {
+            mqttClient.publishCommand(result.slot);
+        }
+
+        res.json({
+            success: true,
+            data: result
+        });
+    } catch (error) {
+        console.error('Voice listen error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
 // POST /api/medicine/dispense - Phát thuốc
 router.post('/dispense', async (req, res) => {
     try {
@@ -47,6 +82,17 @@ router.get('/logs', async (req, res) => {
         res.json({ success: true, data: logs });
     } catch (error) {
         console.error('Get logs error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// GET /api/medicine/stats - Lấy thống kê phát thuốc theo ngày trong tháng
+router.get('/stats', async (req, res) => {
+    try {
+        const stats = await db.getDailyStats();
+        res.json({ success: true, data: stats });
+    } catch (error) {
+        console.error('Get stats error:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
