@@ -2,13 +2,42 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Chart from 'react-apexcharts';
 import mqtt from 'mqtt';
 import { Card, CardHeader } from './components/shadcn/components';
-import { Button, StatusItem, LogItem, EmptyState, ActivityLog, VoiceButton } from './components/shadcn/components';
+import { Button, LogItem, EmptyState, ActivityLog, VoiceButton } from './components/shadcn/components';
 
 const MQTT_URL = process.env.REACT_APP_MQTT_URL || 'mqtt://localhost:1883';
 const STATUS_TOPIC = 'medicine/status';
 const LOGS_TOPIC = 'medicine/logs';
 const COMMAND_TOPIC = 'medicine/command';
 const COMMAND_ACK_TOPIC = 'medicine/command/ack';
+
+const getSlotName = (slot) => (slot === 1 ? 'Thuốc Ho' : slot === 2 ? 'Thuốc Sốt' : `Slot ${slot}`);
+
+// LocalStorage keys
+const STORAGE_KEYS = {
+  logs: 'medicine_logs',
+  stats: 'medicine_stats',
+  lastUpdate: 'medicine_last_update',
+};
+
+// Load from localStorage
+const loadFromStorage = (key) => {
+  try {
+    const data = localStorage.getItem(key);
+    return data ? JSON.parse(data) : null;
+  } catch {
+    return null;
+  }
+};
+
+// Save to localStorage
+const saveToStorage = (key, data) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(data));
+    localStorage.setItem(STORAGE_KEYS.lastUpdate, Date.now());
+  } catch {
+    // Silent fail - storage might be full
+  }
+};
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognition = null;
@@ -20,17 +49,17 @@ if (SpeechRecognition) {
 }
 
 function App() {
-  const [logs, setLogs] = useState([]);
-  const [mqttStatus, setMqttStatus] = useState({ connected: false });
+  const [logs, setLogs] = useState(() => loadFromStorage(STORAGE_KEYS.logs) || []);
+  const [mqttStatus, setMqttStatus] = useState({ connected: false, offline: !navigator.onLine });
   const [espStatus, setEspStatus] = useState({ connected: false, lastSeen: null });
-  const [dispensing, setDispensing] = useState(false);
+  const [dispensing, setDispensing] = useState({ 1: false, 2: false });
   const [listening, setListening] = useState(false);
   const [voiceTranscript, setVoiceTranscript] = useState('');
   const [activityLog, setActivityLog] = useState([]);
-  const [dailyStats, setDailyStats] = useState([]);
+  const [dailyStats, setDailyStats] = useState(() => loadFromStorage(STORAGE_KEYS.stats) || []);
 
   const clientRef = useRef(null);
-  const dispatchRef = useRef({ lastTime: 0, slot: null });
+  const dispatchRef = useRef({ lastTime: { 1: 0, 2: 0 } });
 
   // Helper to add log
   const addLog = useCallback((msg) => {
@@ -99,7 +128,7 @@ function App() {
         // Handle command response (backend confirms command sent)
         if (topic === COMMAND_ACK_TOPIC && data.type === 'command_ack') {
           addLog(`FRONTEND: Command ${data.slot} acknowledged - ${data.status}`);
-          setDispensing(false);
+          setDispensing((prev) => ({ ...prev, [data.slot]: false }));
         }
       } catch (e) {
         addLog(`FRONTEND: Parse error - ${e.message}`);
@@ -174,6 +203,39 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
+  // Persist logs to localStorage when updated
+  useEffect(() => {
+    if (logs.length > 0) {
+      saveToStorage(STORAGE_KEYS.logs, logs);
+    }
+  }, [logs]);
+
+  // Persist stats to localStorage when updated
+  useEffect(() => {
+    if (dailyStats.length > 0) {
+      saveToStorage(STORAGE_KEYS.stats, dailyStats);
+    }
+  }, [dailyStats]);
+
+  // Track online/offline status
+  useEffect(() => {
+    const handleOnline = () => {
+      setMqttStatus((prev) => ({ ...prev, offline: false }));
+      addLog('FRONTEND: Online');
+    };
+    const handleOffline = () => {
+      setMqttStatus((prev) => ({ ...prev, offline: true }));
+      addLog('FRONTEND: Offline - using cached data');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [addLog]);
+
   // Check ESP32 online status
   useEffect(() => {
     const checkEspStatus = () => {
@@ -211,20 +273,37 @@ function App() {
   // Dispense
   const dispense = useCallback(
     async (slot) => {
-      // Debounce: ignore clicks within 3 seconds
+      // Small debounce: ignore clicks within 500ms per slot
       const now = Date.now();
-      if (dispatchRef.current.slot === slot && now - dispatchRef.current.lastTime < 3000) {
-        addLog(`FRONTEND: Ignored duplicate click (debounce)`);
+      if (dispatchRef.current.lastTime[slot] && now - dispatchRef.current.lastTime[slot] < 500) {
+        addLog(`FRONTEND: Debounce ignored click getSlotName(slot)`);
         return;
       }
-      dispatchRef.current = { lastTime: now, slot };
+      dispatchRef.current.lastTime[slot] = now;
 
-      setDispensing(true);
-
-      // Instant UI: Add pending log immediately
-      const pendingLog = { slot, status: 'pending', time: new Date().toISOString() };
-      setLogs((prev) => [pendingLog, ...prev].slice(0, 50));
-      addLog(`FRONTEND: Sending MQTT command slot ${slot}...`);
+      // If same slot is currently dispensing, wait for it to finish first
+      if (dispensing[slot]) {
+        addLog(`FRONTEND: ${getSlotName(slot)} busy, waiting...`);
+        // Wait up to 30 seconds for current operation to finish
+        for (let i = 0; i < 30 && dispensing[slot]; i++) {
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        if (dispensing[slot]) {
+          addLog(`FRONTEND: Timeout waiting for getSlotName(slot)`);
+          return;
+        }
+        // After waiting, mark as dispensing and add pending log
+        setDispensing((prev) => ({ ...prev, [slot]: true }));
+        const pendingLog = { slot, status: 'pending', time: new Date().toISOString() };
+        setLogs((prev) => [pendingLog, ...prev].slice(0, 50));
+        addLog(`FRONTEND: Sending queued command getSlotName(slot)...`);
+      } else {
+        // Not busy
+        setDispensing((prev) => ({ ...prev, [slot]: true }));
+        const pendingLog = { slot, status: 'pending', time: new Date().toISOString() };
+        setLogs((prev) => [pendingLog, ...prev].slice(0, 50));
+        addLog(`FRONTEND: Sending MQTT command getSlotName(slot)...`);
+      }
 
       // Send via MQTT instead of HTTP
       const client = clientRef.current;
@@ -251,7 +330,7 @@ function App() {
           );
           addLog(`FRONTEND: Error - ${error.message}`);
         }
-        setDispensing(false);
+        setDispensing((prev) => ({ ...prev, [slot]: false }));
       }
     },
     [addLog]
@@ -273,9 +352,9 @@ function App() {
       if (data.success && data.data) {
         const { transcript, slot } = data.data;
         setVoiceTranscript(transcript);
-        addLog(`FRONTEND: Backend result - "${transcript}" -> slot ${slot}`);
 
         if (slot) {
+          addLog(`FRONTEND: Backend result - "${transcript}" -> getSlotName(slot)`);
           await dispense(slot);
           setVoiceTranscript(`Đã phát thuốc số ${slot}`);
         } else {
@@ -335,34 +414,20 @@ function App() {
     <div id="app">
       <header className="header">
         <h1>Hộp Thuốc Thông Minh</h1>
-        <p>MQTT Realtime</p>
+        <p>MQTT Realtime {mqttStatus.offline && <span className="offline-badge">Ngoại tuyến</span>}</p>
       </header>
 
       <div className="container">
-        {/* Activity Log */}
-        <Card style={{ marginBottom: 20 }}>
-          <CardHeader title="System Log" />
-          <ActivityLog logs={activityLog} />
-        </Card>
-
-        {/* Status & Control */}
+        {/* Control */}
         <div className="dashboard">
-          <Card>
-            <CardHeader title="Trạng Thái" />
-            <div className="status-grid">
-              <StatusItem label="MQTT" online={mqttStatus.connected} />
-              <StatusItem label="ESP32" online={espStatus.connected} />
-            </div>
-          </Card>
-
           <Card>
             <CardHeader title="Điều Khiển" />
             <div className="control-buttons">
-              <Button variant="primary" onClick={() => dispense(1)} disabled={dispensing}>
-                Phát Thuốc 1
+              <Button variant="primary" onClick={() => dispense(1)} disabled={dispensing[1]}>
+                Phát Thuốc Ho
               </Button>
-              <Button variant="secondary" onClick={() => dispense(2)} disabled={dispensing}>
-                Phát Thuốc 2
+              <Button variant="secondary" onClick={() => dispense(2)} disabled={dispensing[2]}>
+                Phát Thuốc Sốt
               </Button>
             </div>
             {listening && (
@@ -449,8 +514,8 @@ function App() {
                   },
                 }}
                 series={[
-                  { name: 'Thuốc 1', data: dailyStats.map(d => d.slot1) },
-                  { name: 'Thuốc 2', data: dailyStats.map(d => d.slot2) },
+                  { name: 'Thuốc Ho', data: dailyStats.map(d => d.slot1) },
+                  { name: 'Thuốc Sốt', data: dailyStats.map(d => d.slot2) },
                 ]}
               />
             </div>
@@ -469,6 +534,12 @@ function App() {
               ))}
             </div>
           )}
+        </Card>
+
+        {/* System Log */}
+        <Card>
+          <CardHeader title="System Log" />
+          <ActivityLog logs={activityLog} />
         </Card>
       </div>
     </div>

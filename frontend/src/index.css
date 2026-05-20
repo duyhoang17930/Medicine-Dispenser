@@ -140,6 +140,22 @@ body::after {
   text-transform: uppercase;
 }
 
+.offline-badge {
+  display: inline-block;
+  background: #fbbf24;
+  color: #1a1a2e;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  margin-left: 8px;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 /* ===== Container ===== */
 .container {
   max-width: 1100px;

@@ -37,10 +37,16 @@
 #define IR2_PIN   34
 
 // ----- Touch Sensor TTP224 -----
-#define TOUCH_PIN  36
-#define TOUCH_A1 1   // Nút 1: Nhả ngăn A
-#define TOUCH_A2 2   // Nút 2: Nhả ngăn B
-#define TOUCH_RST 3  // Nút 3: Reset hệ thống (tùy chọn)
+// TTP224: 4-channel digital capacitive touch sensor
+// Each channel has dedicated digital output
+// OUT2 -> dispenser 1 (slot 1)
+// OUT3 -> dispenser 2 (slot 2)
+#define TOUCH_A1 32   // GPIO 32: OUT2 -> Dispenser 1
+#define TOUCH_A2 33   // GPIO 33: OUT3 -> Dispenser 2
+
+// Tạo riêng cho mỗi dispenser
+#define DISPENSE_STEPS_1 128  // Slot 1
+#define DISPENSE_STEPS_2 128  // Slot 2
 
 // ----- Thông số -----
 #define IR_THRESHOLD    2800
@@ -85,13 +91,21 @@ State previousState = STATE_IDLE;
 // Command data
 int currentSlot = 0;
 unsigned long stateStartTime = 0;
-volatile bool irTriggered = false;
+
+// Last command timestamp string (anti-duplicate)
+String lastCommandTs[3] = {"", "", ""};
+
+// Touch command queue (for sequential processing)
+int touchQueue[4] = {0, 0, 0, 0};
+int touchQueueFront = 0;
+int touchQueueRear = 0;
 
 // Bien cho multitasking
-volatile bool isDispensing = false;
-volatile bool motorFinished = false;
-TaskHandle_t irTaskHandle = NULL;
-TaskHandle_t stepperTaskHandle = NULL;
+volatile bool isDispensing[3] = {false, false, false};  // index 1-2
+volatile bool motorFinished[3] = {false, false, false};
+volatile bool irTriggered[3] = {false, false, false};
+TaskHandle_t irTaskHandle[3] = {NULL, NULL, NULL};
+TaskHandle_t stepperTaskHandle[3] = {NULL, NULL, NULL};
 
 // IR values
 int ir1Value = 4095;
@@ -101,14 +115,15 @@ int ir2Value = 4095;
 bool touchPressed[4] = {false, false, false, false};
 int touchButtons[4] = {0};
 
-// ISR cho IR
-void IRAM_ATTR ir1ISR() {
-    irTriggered = true;
-}
+// Note: IR sensors are read via digitalRead() in tasks, not ISR
+// These ISRs are not attached, kept for reference only
+// void IRAM_ATTR ir1ISR() {
+//     irTriggered[1] = true;
+// }
 
-void IRAM_ATTR ir2ISR() {
-    irTriggered = true;
-}
+// void IRAM_ATTR ir2ISR() {
+//     irTriggered[2] = true;
+// }
 
 // ==================== SETUP ====================
 void setup() {
@@ -123,7 +138,8 @@ void setup() {
     pinMode(IR2_PIN, INPUT);
 
     // Init Touch pins
-    pinMode(TOUCH_PIN, INPUT);
+    pinMode(TOUCH_A1, INPUT);
+    pinMode(TOUCH_A2, INPUT);
 
     // WiFi
     connectWiFi();
@@ -197,81 +213,57 @@ void loop() {
 // ==================== FSM FUNCTIONS ====================
 
 void fsmIdle() {
-    // Kiểm tra nút chạm
-    if (touchPressed[TOUCH_A1 - 1]) {
-        currentSlot = 1;
-        touchPressed[TOUCH_A1 - 1] = false;
-        transitionTo(STATE_DISPENSE);
-    } else if (touchPressed[TOUCH_A2 - 1]) {
-        currentSlot = 2;
-        touchPressed[TOUCH_A2 - 1] = false;
-        transitionTo(STATE_DISPENSE);
-    } else if (touchPressed[TOUCH_RST - 1]) {
-        // Reset system
-        touchPressed[TOUCH_RST - 1] = false;
-        publishStatus("system_reset");
+    // Process ALL items in touch queue
+    // Launch directly (not via FSM) for concurrent operation
+    while (touchQueueFront != touchQueueRear) {
+        int nextSlot = touchQueue[touchQueueFront];
+        touchQueueFront = (touchQueueFront + 1) % 4;
+
+        // Add back to queue if slot is already running
+        // This ensures sequential for same slot
+        if (isDispensing[nextSlot]) {
+            touchQueue[touchQueueRear] = nextSlot;
+            touchQueueRear = (touchQueueRear + 1) % 4;
+            continue;
+        }
+
+        // Not running - launch directly (concurrent)
+        launchDispense(nextSlot);
     }
-    // MQTT command handled in callback
 }
 
 void fsmDispense() {
     // Guard - neu dang dispensing thi bo qua
-    if (isDispensing) return;
+    if (isDispensing[currentSlot]) return;
 
-    Serial.println("========================================");
-    Serial.print("=> DISPENSE SLOT: ");
-    Serial.println(currentSlot);
-    Serial.println("========================================");
+    // Use the same launch function for both MQTT and touch
+    launchDispense(currentSlot);
 
-    irTriggered = false;
-    motorFinished = false;
-    isDispensing = true;
-
-    // Start IR monitor task
-    xTaskCreatePinnedToCore(
-        irMonitorTask,
-        "IRTask",
-        2048,
-        NULL,
-        1,
-        &irTaskHandle,
-        0
-    );
-
-    // Start stepper task
-    xTaskCreatePinnedToCore(
-        stepperTask,
-        "StepperTask",
-        4096,
-        NULL,
-        1,
-        &stepperTaskHandle,
-        1
-    );
-
-    // Chuyen sang wait
+    // Chuyen sang wait (for UI compatibility)
     stateStartTime = millis();
     transitionTo(STATE_WAIT_SENSOR);
 }
 
 void irMonitorTask(void* parameter) {
+    int slot = (int)parameter;  // Get slot from parameter
     Serial.println("[IR Task] Started");
-    while (isDispensing) {
+
+    while (isDispensing[slot]) {
         // Doc IR lien tuc
         int ir1 = digitalRead(IR1_PIN);
         int ir2 = digitalRead(IR2_PIN);
 
         // Kiem tra theo slot (che IR thi = 0)
         bool detected = false;
-        if (currentSlot == 1) {
+        if (slot == 1) {
             detected = (ir1 == 0);
-        } else if (currentSlot == 2) {
+        } else if (slot == 2) {
             detected = (ir2 == 0);
         }
 
         // Detect ngay khi co Low (1 lan)
         if (detected) {
-            irTriggered = true;
+            irTriggered[slot] = true;
             Serial.println("[IR] DETECTED!");
             break;
         }
@@ -285,22 +277,20 @@ void irMonitorTask(void* parameter) {
 
 // Task 2: Xu ly stepper
 void stepperTask(void* parameter) {
+    int slot = (int)parameter;  // Get slot from parameter
     Serial.println("[Stepper Task] Started");
-
-    // Luu local copy de tranh bi thay doi
-    int slot = currentSlot;
 
     if (slot == 1) {
         // Quay nguoc 90 do
-        for (int i = 0; i < DISPENSE_STEPS && !irTriggered; i++) {
-            for (int step = 3; step >= 0 && !irTriggered; step--) {
+        for (int i = 0; i < DISPENSE_STEPS && !irTriggered[slot]; i++) {
+            for (int step = 3; step >= 0 && !irTriggered[slot]; step--) {
                 setStepperA(step);
                 vTaskDelay(pdMS_TO_TICKS(MOTOR_SPEED));
             }
         }
     } else if (slot == 2) {
-        for (int i = 0; i < DISPENSE_STEPS && !irTriggered; i++) {
-            for (int step = 0; step < 4 && !irTriggered; step++) {
+        for (int i = 0; i < DISPENSE_STEPS && !irTriggered[slot]; i++) {
+            for (int step = 0; step < 4 && !irTriggered[slot]; step++) {
                 setStepperB(step);
                 vTaskDelay(pdMS_TO_TICKS(MOTOR_SPEED));
             }
@@ -338,8 +328,15 @@ void stepperTask(void* parameter) {
     digitalWrite(IN3_B, LOW); digitalWrite(IN4_B, LOW);
 
     // Danh dau da xong
-    isDispensing = false;
-    motorFinished = true;
+    isDispensing[slot] = false;
+    motorFinished[slot] = true;
+
+    // Publish status directly (tasks track themselves, no FSM needed)
+    if (irTriggered[slot]) {
+        publishStatusDirect(slot, "success");
+    } else {
+        publishStatusDirect(slot, "no_pill_detected");
+    }
 
     Serial.println("[Stepper Task] Done");
     vTaskDelete(NULL);
@@ -349,11 +346,11 @@ void fsmWaitSensor() {
     unsigned long elapsed = millis() - stateStartTime;
 
     // Chi bao SUCCESS khi Ca IR interrupt va Motor xong
-    if (irTriggered && motorFinished) {
-        isDispensing = false;
+    if (irTriggered[currentSlot] && motorFinished[currentSlot]) {
+        isDispensing[currentSlot] = false;
         transitionTo(STATE_SUCCESS);
     } else if (elapsed > DISPENSE_TIMEOUT) {
-        isDispensing = false;
+        isDispensing[currentSlot] = false;
         transitionTo(STATE_ERROR);
     }
 }
@@ -363,11 +360,11 @@ void fsmSuccess() {
     Serial.print("=> SUCCESS - Slot ");
     Serial.println(currentSlot);
     Serial.print("=> IR Triggered: ");
-   Serial.println(irTriggered ? "YES" : "NO");
+    Serial.println(irTriggered[currentSlot] ? "YES" : "NO");
     Serial.println("========================================");
 
     publishStatus("success");
-    irTriggered = false;
+    irTriggered[currentSlot] = false;
     currentSlot = 0;
     transitionTo(STATE_IDLE);
 }
@@ -380,7 +377,7 @@ void fsmError() {
     Serial.println("========================================");
 
     publishStatus("no_pill_detected");
-    irTriggered = false;
+    irTriggered[currentSlot] = false;
     currentSlot = 0;
     transitionTo(STATE_IDLE);
 }
@@ -505,28 +502,34 @@ void readIRSensors() {
 // ==================== TOUCH SENSOR ====================
 
 void readTouchSensor() {
-    // TTP224 output: digital (HIGH = pressed)
-    // 4 buttons, each produces different voltage level
-    int raw = analogRead(TOUCH_PIN);
+    // TTP224: each output is digital HIGH when touched
+    // OUT2 -> dispenser 1 (slot 1)
+    // OUT3 -> dispenser 2 (slot 2)
 
-    // Determine which button pressed (approximate ADC values)
-    // No press: ~0-100
-    // Button 1: ~500-1000
-    // Button 2: ~1000-1500
-    // Button 3: ~1500-2000
-    // Button 4: ~2000-2500 (or higher)
-
-    for (int i = 0; i < 4; i++) {
-        if (raw > 400 * (i + 1)) {
-            if (!touchPressed[i]) {
-                touchPressed[i] = true;
-                Serial.print("Touch Button ");
-                Serial.print(i + 1);
-                Serial.println(" PRESSED");
-            }
-        } else {
-            touchPressed[i] = false;
+    // Check OUT2 (dispenser 1)
+    if (digitalRead(TOUCH_A1) == HIGH) {
+        if (!touchPressed[0]) {
+            touchPressed[0] = true;
+            // Add to queue
+            touchQueue[touchQueueRear] = 1;
+            touchQueueRear = (touchQueueRear + 1) % 4;
+            Serial.println("Touch: OUT2 (Dispenser 1) PRESSED -> queued");
         }
+    } else {
+        touchPressed[0] = false;
+    }
+
+    // Check OUT3 (dispenser 2)
+    if (digitalRead(TOUCH_A2) == HIGH) {
+        if (!touchPressed[1]) {
+            touchPressed[1] = true;
+            // Add to queue
+            touchQueue[touchQueueRear] = 2;
+            touchQueueRear = (touchQueueRear + 1) % 4;
+            Serial.println("Touch: OUT3 (Dispenser 2) PRESSED -> queued");
+        }
+    } else {
+        touchPressed[1] = false;
     }
 }
 
@@ -573,7 +576,7 @@ void parseCommand(String msg) {
         slotStart = msg.indexOf("slot:");
     }
 
-    if (slotStart != -1 && currentState == STATE_IDLE) {
+    if (slotStart != -1) {
 
         int numStart = msg.indexOf(":", slotStart) + 1;
 
@@ -584,28 +587,130 @@ void parseCommand(String msg) {
         int slot = msg[numStart] - '0';
 
         if (slot == 1 || slot == 2) {
+            // Extract timestamp from command
+            String cmdTs = "";
+            int tsStart = msg.indexOf("\"timestamp\":");
+            if (tsStart == -1) {
+                tsStart = msg.indexOf("timestamp\":");
+            }
+            if (tsStart != -1) {
+                int tsNum = msg.indexOf(":", tsStart) + 1;
+                while (msg[tsNum] == ' ' || msg[tsNum] == '"') tsNum++;
+                // Extract timestamp string until quote or comma
+                for (int i = tsNum; i < msg.length(); i++) {
+                    char c = msg[i];
+                    if (c == '"' || c == ' ' || c == ',' || c == '}') break;
+                    cmdTs += c;
+                }
+            }
 
-            currentSlot = slot;
+            // Anti-duplicate: ignore if same timestamp within 3 sec
+            if (cmdTs.length() > 0 && cmdTs == lastCommandTs[slot]) {
+                Serial.print("MQTT: Duplicate ignored slot ");
+                Serial.println(slot);
+                return;
+            }
+
+            // If same slot is busy, wait for it to finish first
+            if (isDispensing[slot]) {
+                Serial.print("MQTT: Slot ");
+                Serial.print(slot);
+                Serial.println(" busy, waiting...");
+                unsigned long waitStart = millis();
+                while (isDispensing[slot] && (millis() - waitStart < 30000)) {
+                    delay(100);
+                }
+                if (isDispensing[slot]) {
+                    Serial.print("MQTT: Timeout waiting slot ");
+                    Serial.println(slot);
+                    return;
+                }
+            }
 
             Serial.print("MQTT Command: Slot ");
-            Serial.println(currentSlot);
-
-            // QUAN TRỌNG
-            transitionTo(STATE_DISPENSE);
+            Serial.println(slot);
+            // Save timestamp for anti-duplicate
+            lastCommandTs[slot] = cmdTs;
+            // Launch directly without FSM state machine for concurrent operation
+            launchDispense(slot);
         }
     }
+}
+
+// Launch dispense tasks directly (bypasses FSM for concurrent operation)
+void launchDispense(int slot) {
+    // If busy, put to queue and wait
+    if (isDispensing[slot]) {
+        Serial.print("launchDispense: Slot ");
+        Serial.print(slot);
+        Serial.println(" busy, queuing...");
+
+        // Add back to queue
+        touchQueue[touchQueueRear] = slot;
+        touchQueueRear = (touchQueueRear + 1) % 4;
+        return;
+    }
+
+    Serial.println("========================================");
+    Serial.print("=> DISPENSE SLOT: ");
+    Serial.println(slot);
+    Serial.println("========================================");
+
+    irTriggered[slot] = false;
+    motorFinished[slot] = false;
+    isDispensing[slot] = true;
+
+    // Start IR monitor task
+    xTaskCreatePinnedToCore(
+        irMonitorTask,
+        "IRTask",
+        2048,
+        (void*)slot,
+        1,
+        &irTaskHandle[slot],
+        0
+    );
+
+    // Start stepper task
+    xTaskCreatePinnedToCore(
+        stepperTask,
+        "StepperTask",
+        4096,
+        (void*)slot,
+        1,
+        &stepperTaskHandle[slot],
+        1
+    );
+
+    Serial.println("[Tasks launched]");
 }
 
 void publishStatus(const char* status) {
     String payload = "{";
     payload += "\"slot\":" + String(currentSlot) + ",";
     payload += "\"status\":\"" + String(status) + "\",";
-    payload += "\"ir_triggered\":" + String(irTriggered ? "true" : "false");
+    payload += "\"ir_triggered\":" + String(irTriggered[currentSlot] ? "true" : "false");
     payload += "}";
 
     mqttClient.publish(STATUS_TOPIC, payload.c_str());
     Serial.print("Published: ");
     Serial.println(payload);
+}
+
+// Publish status directly (for concurrent operation)
+void publishStatusDirect(int slot, const char* status) {
+    String payload = "{";
+    payload += "\"slot\":" + String(slot) + ",";
+    payload += "\"status\":\"" + String(status) + "\",";
+    payload += "\"ir_triggered\":" + String(irTriggered[slot] ? "true" : "false");
+    payload += "}";
+
+    mqttClient.publish(STATUS_TOPIC, payload.c_str());
+    Serial.print("Published: ");
+    Serial.println(payload);
+
+    // Clear flags for this slot
+    irTriggered[slot] = false;
 }
 
 // ==================== WiFi ====================

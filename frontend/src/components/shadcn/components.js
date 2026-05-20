@@ -274,6 +274,8 @@ export function StatusItem({ label, online }) {
 // -----------------------------------------------------------------------------
 // LogItem Component
 // -----------------------------------------------------------------------------
+const getSlotName = (slot) => (slot === 1 ? 'Thuốc Ho' : slot === 2 ? 'Thuốc Sốt' : `Slot ${slot}`);
+
 export function LogItem({ slot, time, status }) {
   const statusVariant = {
     success: 'success',
@@ -319,7 +321,7 @@ export function LogItem({ slot, time, status }) {
       }}
     >
       <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: '0.9rem' }}>
-        Thuốc {slot}
+        {getSlotName(slot)}
       </span>
       <span
         style={{
