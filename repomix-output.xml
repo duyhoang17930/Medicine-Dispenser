@@ -1,0 +1,4794 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+backend/.env
+backend/database/db.js
+backend/database/schema.sql
+backend/esp32/medicine_dispenser_fsm/medicine_dispenser_fsm.ino
+backend/mqtt/mqttClient.js
+backend/package.json
+backend/README.md
+backend/routes/medicine.js
+backend/server.js
+docs/project-overview-pdr.md
+example.py
+frontend/.env
+frontend/.gitignore
+frontend/package.json
+frontend/public/index.html
+frontend/public/manifest.json
+frontend/README.md
+frontend/src/App.js
+frontend/src/components/shadcn/components.js
+frontend/src/index.css
+frontend/src/index.js
+run-voice.bat
+SETUP.md
+voice-control.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".gitignore">
+/.claude
+backend/node_modules/
+frontend/node_modules/
+backend/build/
+frontend/build/
+</file>
+
+<file path="backend/.env">
+# Backend Environment Configuration
+PORT=3000
+
+# MQTT Broker Settings
+MQTT_BROKER_URL=mqtt://localhost:1883
+MQTT_USERNAME=
+MQTT_PASSWORD=
+
+# MySQL Database Settings
+DB_HOST=localhost
+DB_USER=root
+DB_PASSWORD=123456
+DB_NAME=medicine_dispenser
+
+# ESP32 MQTT Topics
+MEDICINE_COMMAND_TOPIC=medicine/command
+MEDICINE_STATUS_TOPIC=medicine/status
+</file>
+
+<file path="backend/database/db.js">
+const mysql = require('mysql2/promise');
+require('dotenv').config();
+
+let pool = null;
+
+async function getPool() {
+    if (!pool) {
+        pool = mysql.createPool({
+            host: process.env.DB_HOST || 'localhost',
+            user: process.env.DB_USER || 'root',
+            password: process.env.DB_PASSWORD || '',
+            database: process.env.DB_NAME || 'medicine_dispenser',
+            waitForConnections: true,
+            connectionLimit: 10,
+            queueLimit: 0
+        });
+    }
+    return pool;
+}
+
+async function query(sql, params = []) {
+    const pool = await getPool();
+    // Use query() instead of execute() for dynamic LIMIT
+    const [rows] = await pool.query(sql, params);
+    return rows;
+}
+
+async function logMedicine(slot, status, message = null) {
+    const sql = 'INSERT INTO medicine_logs (slot, status, message) VALUES (?, ?, ?)';
+    return query(sql, [slot, status, message]);
+}
+
+async function getLogs(limit = 50) {
+    const sql = 'SELECT id, slot, status, message,created_at AS time FROM medicine_logs ORDER BY created_at DESC LIMIT ' + parseInt(limit);
+    return query(sql, []);
+}
+
+async function updateSystemStatus(component, status, details = null) {
+    const sql = 'UPDATE system_status SET status = ?, details = ? WHERE component = ?';
+    return query(sql, [status, details, component]);
+}
+
+async function getSystemStatus() {
+    const sql = 'SELECT * FROM system_status';
+    return query(sql);
+}
+
+async function getDailyStats() {
+    const sql = `
+        SELECT
+            DATE(created_at) as date,
+            SUM(CASE WHEN slot = 1 THEN 1 ELSE 0 END) as slot1,
+            SUM(CASE WHEN slot = 2 THEN 1 ELSE 0 END) as slot2,
+            COUNT(*) as total
+        FROM medicine_logs
+        WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+            AND status = 'success'
+        GROUP BY DATE(created_at)
+        ORDER BY date ASC
+    `;
+    return query(sql);
+}
+
+module.exports = {
+    getPool,
+    query,
+    logMedicine,
+    getLogs,
+    updateSystemStatus,
+    getSystemStatus,
+    getDailyStats
+};
+</file>
+
+<file path="backend/database/schema.sql">
+-- Medicine Dispenser Database Schema
+-- Run this SQL to create the database and tables
+
+CREATE DATABASE IF NOT EXISTS medicine_dispenser;
+USE medicine_dispenser;
+
+-- Table: medicine_logs - Lưu lịch sử phát thuốc
+CREATE TABLE IF NOT EXISTS medicine_logs (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    slot INT NOT NULL COMMENT 'Số thuốc (1 hoặc 2)',
+    status VARCHAR(20) NOT NULL COMMENT 'Trạng thái: success, fail, no_pill_detected',
+    message VARCHAR(255) DEFAULT NULL COMMENT 'Thông báo thêm',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT 'Thời gian tạo'
+);
+
+-- Table: system_status - Lưu trạng thái hệ thống
+CREATE TABLE IF NOT EXISTS system_status (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    component VARCHAR(50) NOT NULL COMMENT 'Tên component: esp32, mqtt, servo1, servo2, ir_sensor',
+    status VARCHAR(20) NOT NULL COMMENT 'Trạng thái: online, offline, error',
+    last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    details TEXT DEFAULT NULL COMMENT 'Chi tiết thêm'
+);
+
+-- Insert initial system status
+INSERT INTO system_status (component, status, details) VALUES
+('esp32', 'offline', 'Chưa kết nối'),
+('mqtt', 'offline', 'Chưa kết nối'),
+('servo1', 'offline', 'Chưa kích hoạt'),
+('servo2', 'offline', 'Chưa kích hoạt'),
+('ir_sensor', 'offline', 'Chưa kích hoạt');
+
+-- Table: voice_commands - Lưu lệnh giọng nói
+CREATE TABLE IF NOT EXISTS voice_commands (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    command_text VARCHAR(255) NOT NULL COMMENT 'Câu lệnh gốc',
+    slot INT NOT NULL COMMENT 'Số thuốc được phát',
+    confidence FLOAT DEFAULT 1.0 COMMENT 'Độ tin cậy nhận dạng',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Index for faster queries
+CREATE INDEX idx_medicine_logs_created_at ON medicine_logs(created_at);
+CREATE INDEX idx_medicine_logs_slot ON medicine_logs(slot);
+</file>
+
+<file path="backend/esp32/medicine_dispenser_fsm/medicine_dispenser_fsm.ino">
+/**
+ * Medicine Dispenser ESP32 - Stepper Motor + Touch Sensor Version
+ * Hardware: 2x Stepper 28BYJ-48 (ULN2003), 2x IR, 1x TTP224
+ * FSM: IDLE → DISPENSE → WAIT_SENSOR → SUCCESS/ERROR → IDLE
+ */
+
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+// ==================== CẤU HÌNH ====================
+#define WIFI_SSID     "Rẹt"
+#define WIFI_PASSWORD "05012005"
+#define MQTT_SERVER   "172.20.10.3"
+#define MQTT_PORT    1883
+#define MQTT_USERNAME ""
+#define MQTT_PASSWORD  ""
+
+#define COMMAND_TOPIC "medicine/command"
+#define STATUS_TOPIC  "medicine/status"
+
+// ----- Stepper Motor 1 (Ngăn A) -----
+#define IN1_A  26
+#define IN2_A  27
+#define IN3_A  14
+#define IN4_A  13
+
+// ----- Stepper Motor 2 (Ngăn B) -----
+#define IN1_B  16
+#define IN2_B  17
+#define IN3_B  18
+#define IN4_B  19
+
+// ----- IR Sensors (Digital) -----
+#define IR1_PIN   35
+#define IR2_PIN   34
+
+// ----- Touch Sensor TTP224 -----
+// TTP224: 4-channel digital capacitive touch sensor
+// Each channel has dedicated digital output
+// OUT2 -> dispenser 1 (slot 1)
+// OUT3 -> dispenser 2 (slot 2)
+#define TOUCH_A1 32   // GPIO 32: OUT2 -> Dispenser 1
+#define TOUCH_A2 33   // GPIO 33: OUT3 -> Dispenser 2
+
+// Tạo riêng cho mỗi dispenser
+#define DISPENSE_STEPS_1 128  // Slot 1
+#define DISPENSE_STEPS_2 128  // Slot 2
+
+// ----- Thông số -----
+#define IR_THRESHOLD    2800
+#define STEPS_PER_REV   2048  // 28BYJ-48 full revolution
+#define DISPENSE_STEPS  128  // Xoay 1/4 vòng = 8 khoang
+#define MOTOR_SPEED     3   // Delay per step (ms)
+#define DISPENSE_TIMEOUT 5000 // Timeout chờ IR (ms)
+
+// ==================== STATE MACHINE ====================
+enum State {
+    STATE_IDLE,
+    STATE_DISPENSE,
+    STATE_WAIT_SENSOR,
+    STATE_SUCCESS,
+    STATE_ERROR
+};
+
+const char* stateNames[] = {
+    "IDLE",
+    "DISPENSE",
+    "WAIT_SENSOR",
+    "SUCCESS",
+    "ERROR"
+};
+
+// Forward declarations
+void transitionTo(State newState);
+void fsmIdle();
+void fsmDispense();
+void fsmWaitSensor();
+void fsmSuccess();
+void fsmError();
+
+// ==================== BIẾN ====================
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+// FSM state
+State currentState = STATE_IDLE;
+State previousState = STATE_IDLE;
+
+// Command data
+int currentSlot = 0;
+unsigned long stateStartTime = 0;
+
+// Last command timestamp string (anti-duplicate)
+String lastCommandTs[3] = {"", "", ""};
+
+// Touch command queue (for sequential processing)
+int touchQueue[4] = {0, 0, 0, 0};
+int touchQueueFront = 0;
+int touchQueueRear = 0;
+
+// Bien cho multitasking
+volatile bool isDispensing[3] = {false, false, false};  // index 1-2
+volatile bool motorFinished[3] = {false, false, false};
+volatile bool irTriggered[3] = {false, false, false};
+TaskHandle_t irTaskHandle[3] = {NULL, NULL, NULL};
+TaskHandle_t stepperTaskHandle[3] = {NULL, NULL, NULL};
+
+// IR values
+int ir1Value = 4095;
+int ir2Value = 4095;
+
+// Touch values
+bool touchPressed[4] = {false, false, false, false};
+int touchButtons[4] = {0};
+
+// Note: IR sensors are read via digitalRead() in tasks, not ISR
+// These ISRs are not attached, kept for reference only
+// void IRAM_ATTR ir1ISR() {
+//     irTriggered[1] = true;
+// }
+
+// void IRAM_ATTR ir2ISR() {
+//     irTriggered[2] = true;
+// }
+
+// ==================== SETUP ====================
+void setup() {
+    Serial.begin(9600);
+    Serial.println("\n===== Medicine Dispenser - Stepper v1.0 =====");
+
+    // Init Stepper pins
+    initStepperPins();
+
+    // Init IR pins - Digital (Poll mode, KO pullup)
+    pinMode(IR1_PIN, INPUT);
+    pinMode(IR2_PIN, INPUT);
+
+    // Init Touch pins
+    pinMode(TOUCH_A1, INPUT);
+    pinMode(TOUCH_A2, INPUT);
+
+    // WiFi
+    connectWiFi();
+
+    // MQTT
+    mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+    mqttClient.setCallback(mqttCallback);
+
+    Serial.println("===== Setup Complete =====\n");
+    
+}
+
+void initStepperPins() {
+    // Stepper A
+    pinMode(IN1_A, OUTPUT);
+    pinMode(IN2_A, OUTPUT);
+    pinMode(IN3_A, OUTPUT);
+    pinMode(IN4_A, OUTPUT);
+
+    // Stepper B
+    pinMode(IN1_B, OUTPUT);
+    pinMode(IN2_B, OUTPUT);
+    pinMode(IN3_B, OUTPUT);
+    pinMode(IN4_B, OUTPUT);
+
+    // Set all LOW initially
+    digitalWrite(IN1_A, LOW);
+    digitalWrite(IN2_A, LOW);
+    digitalWrite(IN3_A, LOW);
+    digitalWrite(IN4_A, LOW);
+    digitalWrite(IN1_B, LOW);
+    digitalWrite(IN2_B, LOW);
+    digitalWrite(IN3_B, LOW);
+    digitalWrite(IN4_B, LOW);
+}
+
+// ==================== LOOP ====================
+void loop() {
+    // Đọc cảm biến (IR da digital, khong can analog)
+    // readIRSensors();
+    readTouchSensor();
+
+    // Kiểm tra MQTT
+    if (!mqttClient.connected()) {
+        reconnectMQTT();
+    }
+    mqttClient.loop();
+
+    // FSM
+    switch (currentState) {
+        case STATE_IDLE:
+            fsmIdle();
+            break;
+        case STATE_DISPENSE:
+            fsmDispense();
+            break;
+        case STATE_WAIT_SENSOR:
+            fsmWaitSensor();
+            break;
+        case STATE_SUCCESS:
+            fsmSuccess();
+            break;
+        case STATE_ERROR:
+            fsmError();
+            break;
+    }
+
+    delay(10);
+}
+
+// ==================== FSM FUNCTIONS ====================
+
+void fsmIdle() {
+    // Process ALL items in touch queue
+    // Launch directly (not via FSM) for concurrent operation
+    while (touchQueueFront != touchQueueRear) {
+        int nextSlot = touchQueue[touchQueueFront];
+        touchQueueFront = (touchQueueFront + 1) % 4;
+
+        // Add back to queue if slot is already running
+        // This ensures sequential for same slot
+        if (isDispensing[nextSlot]) {
+            touchQueue[touchQueueRear] = nextSlot;
+            touchQueueRear = (touchQueueRear + 1) % 4;
+            continue;
+        }
+
+        // Not running - launch directly (concurrent)
+        launchDispense(nextSlot);
+    }
+}
+
+void fsmDispense() {
+    // Guard - neu dang dispensing thi bo qua
+    if (isDispensing[currentSlot]) return;
+
+    // Use the same launch function for both MQTT and touch
+    launchDispense(currentSlot);
+
+    // Chuyen sang wait (for UI compatibility)
+    stateStartTime = millis();
+    transitionTo(STATE_WAIT_SENSOR);
+}
+
+void irMonitorTask(void* parameter) {
+    int slot = (int)parameter;  // Get slot from parameter
+    Serial.println("[IR Task] Started");
+
+    while (isDispensing[slot]) {
+        // Doc IR lien tuc
+        int ir1 = digitalRead(IR1_PIN);
+        int ir2 = digitalRead(IR2_PIN);
+
+        // Kiem tra theo slot (che IR thi = 0)
+        bool detected = false;
+        if (slot == 1) {
+            detected = (ir1 == 0);
+        } else if (slot == 2) {
+            detected = (ir2 == 0);
+        }
+
+        // Detect ngay khi co Low (1 lan)
+        if (detected) {
+            irTriggered[slot] = true;
+            Serial.println("[IR] DETECTED!");
+            break;
+        }
+
+        vTaskDelay(1);
+    }
+
+    Serial.println("[IR Task] Stopped");
+    vTaskDelete(NULL);
+}
+
+// Task 2: Xu ly stepper
+void stepperTask(void* parameter) {
+    int slot = (int)parameter;  // Get slot from parameter
+    Serial.println("[Stepper Task] Started");
+
+    if (slot == 1) {
+        // Quay nguoc 90 do
+        for (int i = 0; i < DISPENSE_STEPS && !irTriggered[slot]; i++) {
+            for (int step = 3; step >= 0 && !irTriggered[slot]; step--) {
+                setStepperA(step);
+                vTaskDelay(pdMS_TO_TICKS(MOTOR_SPEED));
+            }
+        }
+    } else if (slot == 2) {
+        for (int i = 0; i < DISPENSE_STEPS && !irTriggered[slot]; i++) {
+            for (int step = 0; step < 4 && !irTriggered[slot]; step++) {
+                setStepperB(step);
+                vTaskDelay(pdMS_TO_TICKS(MOTOR_SPEED));
+            }
+        }
+    }
+
+    // Tat dong co truoc khi quay ve
+    digitalWrite(IN1_A, LOW); digitalWrite(IN2_A, LOW);
+    digitalWrite(IN3_A, LOW); digitalWrite(IN4_A, LOW);
+    digitalWrite(IN1_B, LOW); digitalWrite(IN2_B, LOW);
+    digitalWrite(IN3_B, LOW); digitalWrite(IN4_B, LOW);
+
+    // Quay ve vi tri ban dau (ALWAYS)
+    vTaskDelay(pdMS_TO_TICKS(200));
+    if (slot == 1) {
+        for (int i = 0; i < DISPENSE_STEPS; i++) {
+            for (int step = 0; step < 4; step++) {
+                setStepperA(step);
+                vTaskDelay(pdMS_TO_TICKS(MOTOR_SPEED));
+            }
+        }
+    } else if (slot == 2) {
+        for (int i = 0; i < DISPENSE_STEPS; i++) {
+            for (int step = 3; step >= 0; step--) {
+                setStepperB(step);
+                vTaskDelay(pdMS_TO_TICKS(MOTOR_SPEED));
+            }
+        }
+    }
+
+    // Tat het dong co
+    digitalWrite(IN1_A, LOW); digitalWrite(IN2_A, LOW);
+    digitalWrite(IN3_A, LOW); digitalWrite(IN4_A, LOW);
+    digitalWrite(IN1_B, LOW); digitalWrite(IN2_B, LOW);
+    digitalWrite(IN3_B, LOW); digitalWrite(IN4_B, LOW);
+
+    // Danh dau da xong
+    isDispensing[slot] = false;
+    motorFinished[slot] = true;
+
+    // Publish status directly (tasks track themselves, no FSM needed)
+    if (irTriggered[slot]) {
+        publishStatusDirect(slot, "success");
+    } else {
+        publishStatusDirect(slot, "no_pill_detected");
+    }
+
+    Serial.println("[Stepper Task] Done");
+    vTaskDelete(NULL);
+}
+
+void fsmWaitSensor() {
+    unsigned long elapsed = millis() - stateStartTime;
+
+    // Chi bao SUCCESS khi Ca IR interrupt va Motor xong
+    if (irTriggered[currentSlot] && motorFinished[currentSlot]) {
+        isDispensing[currentSlot] = false;
+        transitionTo(STATE_SUCCESS);
+    } else if (elapsed > DISPENSE_TIMEOUT) {
+        isDispensing[currentSlot] = false;
+        transitionTo(STATE_ERROR);
+    }
+}
+
+void fsmSuccess() {
+    Serial.println("========================================");
+    Serial.print("=> SUCCESS - Slot ");
+    Serial.println(currentSlot);
+    Serial.print("=> IR Triggered: ");
+    Serial.println(irTriggered[currentSlot] ? "YES" : "NO");
+    Serial.println("========================================");
+
+    publishStatus("success");
+    irTriggered[currentSlot] = false;
+    currentSlot = 0;
+    transitionTo(STATE_IDLE);
+}
+
+void fsmError() {
+    Serial.println("========================================");
+    Serial.print("=> ERROR - Slot ");
+    Serial.println(currentSlot);
+    Serial.println("=> NO PILL DETECTED");
+    Serial.println("========================================");
+
+    publishStatus("no_pill_detected");
+    irTriggered[currentSlot] = false;
+    currentSlot = 0;
+    transitionTo(STATE_IDLE);
+}
+
+void transitionTo(State newState) {
+    if (newState != currentState) {
+        Serial.print("State: ");
+        Serial.print(stateNames[currentState]);
+        Serial.print(" -> ");
+        Serial.println(stateNames[newState]);
+
+        previousState = currentState;
+        currentState = newState;
+        stateStartTime = millis();
+    }
+}
+
+// ==================== STEPPER MOTOR ====================
+
+void rotateStepperA(int steps) {
+    // Xoay nguoc chieu 90 do
+    for (int i = 0; i < steps; i++) {
+        for (int step = 3; step >= 0; step--) {
+            setStepperA(step);
+            delay(MOTOR_SPEED);
+        }
+    }
+    // Tat dong co
+    digitalWrite(IN1_A, LOW);
+    digitalWrite(IN2_A, LOW);
+    digitalWrite(IN3_A, LOW);
+    digitalWrite(IN4_A, LOW);
+
+    delay(200); // Cho 200ms
+
+    // Quay ve vi tri ban dau (chieu thuan)
+    for (int i = 0; i < steps; i++) {
+        for (int step = 0; step < 4; step++) {
+            setStepperA(step);
+            delay(MOTOR_SPEED);
+        }
+    }
+    // Tat dong co
+    digitalWrite(IN1_A, LOW);
+    digitalWrite(IN2_A, LOW);
+    digitalWrite(IN3_A, LOW);
+    digitalWrite(IN4_A, LOW);
+}
+
+void rotateStepperB(int steps) {
+    // Xoay thuan 90 do
+    for (int i = 0; i < steps; i++) {
+        for (int step = 0; step < 4; step++) {
+            setStepperB(step);
+            delay(MOTOR_SPEED);
+        }
+    }
+    // Tat dong co
+    digitalWrite(IN1_B, LOW);
+    digitalWrite(IN2_B, LOW);
+    digitalWrite(IN3_B, LOW);
+    digitalWrite(IN4_B, LOW);
+
+    delay(200); // Cho 200ms
+
+    // Quay ve vi tri ban dau (nguoc chieu)
+    for (int i = 0; i < steps; i++) {
+        for (int step = 3; step >= 0; step--) {
+            setStepperB(step);
+            delay(MOTOR_SPEED);
+        }
+    }
+    // Tat dong co
+    digitalWrite(IN1_B, LOW);
+    digitalWrite(IN2_B, LOW);
+    digitalWrite(IN3_B, LOW);
+    digitalWrite(IN4_B, LOW);
+}
+
+void setStepperA(int step) {
+    // 4-phase sequence for 28BYJ-48
+    switch (step % 4) {
+        case 0:
+            digitalWrite(IN1_A, HIGH); digitalWrite(IN2_A, HIGH); digitalWrite(IN3_A, LOW); digitalWrite(IN4_A, LOW);
+            break;
+        case 1:
+            digitalWrite(IN1_A, LOW); digitalWrite(IN2_A, HIGH); digitalWrite(IN3_A, HIGH); digitalWrite(IN4_A, LOW);
+            break;
+        case 2:
+            digitalWrite(IN1_A, LOW); digitalWrite(IN2_A, LOW); digitalWrite(IN3_A, HIGH); digitalWrite(IN4_A, HIGH);
+            break;
+        case 3:
+            digitalWrite(IN1_A, HIGH); digitalWrite(IN2_A, LOW); digitalWrite(IN3_A, LOW); digitalWrite(IN4_A, HIGH);
+            break;
+    }
+}
+
+void setStepperB(int step) {
+    switch (step % 4) {
+        case 0:
+            digitalWrite(IN1_B, HIGH); digitalWrite(IN2_B, HIGH); digitalWrite(IN3_B, LOW); digitalWrite(IN4_B, LOW);
+            break;
+        case 1:
+            digitalWrite(IN1_B, LOW); digitalWrite(IN2_B, HIGH); digitalWrite(IN3_B, HIGH); digitalWrite(IN4_B, LOW);
+            break;
+        case 2:
+            digitalWrite(IN1_B, LOW); digitalWrite(IN2_B, LOW); digitalWrite(IN3_B, HIGH); digitalWrite(IN4_B, HIGH);
+            break;
+        case 3:
+            digitalWrite(IN1_B, HIGH); digitalWrite(IN2_B, LOW); digitalWrite(IN3_B, LOW); digitalWrite(IN4_B, HIGH);
+            break;
+    }
+}
+
+// ==================== IR SENSOR ====================
+
+void readIRSensors() {
+    ir1Value = analogRead(IR1_PIN);
+    ir2Value = analogRead(IR2_PIN);
+}
+
+// ==================== TOUCH SENSOR ====================
+
+void readTouchSensor() {
+    // TTP224: each output is digital HIGH when touched
+    // OUT2 -> dispenser 1 (slot 1)
+    // OUT3 -> dispenser 2 (slot 2)
+
+    // Check OUT2 (dispenser 1)
+    if (digitalRead(TOUCH_A1) == HIGH) {
+        if (!touchPressed[0]) {
+            touchPressed[0] = true;
+            // Add to queue
+            touchQueue[touchQueueRear] = 1;
+            touchQueueRear = (touchQueueRear + 1) % 4;
+            Serial.println("Touch: OUT2 (Dispenser 1) PRESSED -> queued");
+        }
+    } else {
+        touchPressed[0] = false;
+    }
+
+    // Check OUT3 (dispenser 2)
+    if (digitalRead(TOUCH_A2) == HIGH) {
+        if (!touchPressed[1]) {
+            touchPressed[1] = true;
+            // Add to queue
+            touchQueue[touchQueueRear] = 2;
+            touchQueueRear = (touchQueueRear + 1) % 4;
+            Serial.println("Touch: OUT3 (Dispenser 2) PRESSED -> queued");
+        }
+    } else {
+        touchPressed[1] = false;
+    }
+}
+
+// ==================== MQTT ====================
+
+void reconnectMQTT() {
+    static unsigned long lastAttempt = 0;
+    if (millis() - lastAttempt < 2000) return;
+    lastAttempt = millis();
+
+    Serial.print("MQTT connecting to ");
+    Serial.print(MQTT_SERVER);
+    Serial.print(":");
+    Serial.println(MQTT_PORT);
+
+    String clientId = "ESP32_med_" + String(random(0xffff), HEX);
+    if (mqttClient.connect(clientId.c_str())) {
+        Serial.println("MQTT Connected!");
+        mqttClient.subscribe(COMMAND_TOPIC);
+    } else {
+        Serial.print("MQTT failed, code: ");
+        Serial.println(mqttClient.state());
+    }
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int len) {
+    String msg;
+    for (int i = 0; i < len; i++) msg += (char)payload[i];
+
+    Serial.print("MQTT [");
+    Serial.print(topic);
+    Serial.print("]: ");
+    Serial.println(msg);
+
+    if (String(topic) == COMMAND_TOPIC) {
+        parseCommand(msg);
+    }
+}
+
+void parseCommand(String msg) {
+    int slotStart = msg.indexOf("\"slot\":");
+
+    if (slotStart == -1) {
+        slotStart = msg.indexOf("slot:");
+    }
+
+    if (slotStart != -1) {
+
+        int numStart = msg.indexOf(":", slotStart) + 1;
+
+        while (msg[numStart] == ' ' || msg[numStart] == '"') {
+            numStart++;
+        }
+
+        int slot = msg[numStart] - '0';
+
+        if (slot == 1 || slot == 2) {
+            // Extract timestamp from command
+            String cmdTs = "";
+            int tsStart = msg.indexOf("\"timestamp\":");
+            if (tsStart == -1) {
+                tsStart = msg.indexOf("timestamp\":");
+            }
+            if (tsStart != -1) {
+                int tsNum = msg.indexOf(":", tsStart) + 1;
+                while (msg[tsNum] == ' ' || msg[tsNum] == '"') tsNum++;
+                // Extract timestamp string until quote or comma
+                for (int i = tsNum; i < msg.length(); i++) {
+                    char c = msg[i];
+                    if (c == '"' || c == ' ' || c == ',' || c == '}') break;
+                    cmdTs += c;
+                }
+            }
+
+            // Anti-duplicate: ignore if same timestamp within 3 sec
+            if (cmdTs.length() > 0 && cmdTs == lastCommandTs[slot]) {
+                Serial.print("MQTT: Duplicate ignored slot ");
+                Serial.println(slot);
+                return;
+            }
+
+            // If same slot is busy, wait for it to finish first
+            if (isDispensing[slot]) {
+                Serial.print("MQTT: Slot ");
+                Serial.print(slot);
+                Serial.println(" busy, waiting...");
+                unsigned long waitStart = millis();
+                while (isDispensing[slot] && (millis() - waitStart < 30000)) {
+                    delay(100);
+                }
+                if (isDispensing[slot]) {
+                    Serial.print("MQTT: Timeout waiting slot ");
+                    Serial.println(slot);
+                    return;
+                }
+            }
+
+            Serial.print("MQTT Command: Slot ");
+            Serial.println(slot);
+            // Save timestamp for anti-duplicate
+            lastCommandTs[slot] = cmdTs;
+            // Launch directly without FSM state machine for concurrent operation
+            launchDispense(slot);
+        }
+    }
+}
+
+// Launch dispense tasks directly (bypasses FSM for concurrent operation)
+void launchDispense(int slot) {
+    // If busy, put to queue and wait
+    if (isDispensing[slot]) {
+        Serial.print("launchDispense: Slot ");
+        Serial.print(slot);
+        Serial.println(" busy, queuing...");
+
+        // Add back to queue
+        touchQueue[touchQueueRear] = slot;
+        touchQueueRear = (touchQueueRear + 1) % 4;
+        return;
+    }
+
+    Serial.println("========================================");
+    Serial.print("=> DISPENSE SLOT: ");
+    Serial.println(slot);
+    Serial.println("========================================");
+
+    irTriggered[slot] = false;
+    motorFinished[slot] = false;
+    isDispensing[slot] = true;
+
+    // Start IR monitor task
+    xTaskCreatePinnedToCore(
+        irMonitorTask,
+        "IRTask",
+        2048,
+        (void*)slot,
+        1,
+        &irTaskHandle[slot],
+        0
+    );
+
+    // Start stepper task
+    xTaskCreatePinnedToCore(
+        stepperTask,
+        "StepperTask",
+        4096,
+        (void*)slot,
+        1,
+        &stepperTaskHandle[slot],
+        1
+    );
+
+    Serial.println("[Tasks launched]");
+}
+
+void publishStatus(const char* status) {
+    String payload = "{";
+    payload += "\"slot\":" + String(currentSlot) + ",";
+    payload += "\"status\":\"" + String(status) + "\",";
+    payload += "\"ir_triggered\":" + String(irTriggered[currentSlot] ? "true" : "false");
+    payload += "}";
+
+    mqttClient.publish(STATUS_TOPIC, payload.c_str());
+    Serial.print("Published: ");
+    Serial.println(payload);
+}
+
+// Publish status directly (for concurrent operation)
+void publishStatusDirect(int slot, const char* status) {
+    String payload = "{";
+    payload += "\"slot\":" + String(slot) + ",";
+    payload += "\"status\":\"" + String(status) + "\",";
+    payload += "\"ir_triggered\":" + String(irTriggered[slot] ? "true" : "false");
+    payload += "}";
+
+    mqttClient.publish(STATUS_TOPIC, payload.c_str());
+    Serial.print("Published: ");
+    Serial.println(payload);
+
+    // Clear flags for this slot
+    irTriggered[slot] = false;
+}
+
+// ==================== WiFi ====================
+
+void connectWiFi() {
+    Serial.print("Connecting WiFi: ");
+    Serial.println(WIFI_SSID);
+
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    int attempts = 0;
+
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nWiFi OK!");
+        Serial.print("IP: ");
+        Serial.println(WiFi.localIP());
+    } else {
+        Serial.println("\nWiFi FAILED!");
+    }
+}
+</file>
+
+<file path="backend/mqtt/mqttClient.js">
+const mqtt = require('mqtt');
+require('dotenv').config();
+
+let client = null;
+
+// Topic names at module scope
+const STATUS_TOPIC = process.env.MEDICINE_STATUS_TOPIC || 'medicine/status';
+const LOGS_TOPIC = process.env.MEDICINE_LOGS_TOPIC || 'medicine/logs';
+const COMMAND_TOPIC = process.env.MEDICINE_COMMAND_TOPIC || 'medicine/command';
+const COMMAND_ACK_TOPIC = COMMAND_TOPIC + '/ack';
+
+function init() {
+    const brokerUrl = process.env.MQTT_BROKER_URL || 'mqtt://localhost:1883';
+
+    client = mqtt.connect(brokerUrl, {
+        clientId: 'medicine_backend_' + Math.random().toString(16).substr(2, 8),
+        clean: true,
+        connectTimeout: 4000,
+        reconnectPeriod: 1000,
+    });
+
+    client.on('connect', () => {
+        console.log('');
+        console.log('========================================');
+        console.log('[BACKEND] MQTT Connected to broker');
+        console.log('========================================');
+
+        // Use module-level topic constants
+        client.subscribe(STATUS_TOPIC, (err) => {
+            if (err) {
+                console.error('[BACKEND] Subscribe error:', err);
+            } else {
+                console.log(`[BACKEND] Subscribed to ${STATUS_TOPIC}`);
+            }
+        });
+        client.subscribe(LOGS_TOPIC, (err) => {
+            if (err) {
+                console.error('[BACKEND] Subscribe logs error:', err);
+            }
+        });
+        client.subscribe(COMMAND_TOPIC, (err) => {
+            if (err) {
+                console.error('[BACKEND] Subscribe command error:', err);
+            } else {
+                console.log(`[BACKEND] Subscribed to ${COMMAND_TOPIC}`);
+            }
+        });
+    });
+
+    client.on('message', async (topic, message) => {
+        const timestamp = new Date().toISOString();
+        console.log('');
+        console.log('========================================');
+        console.log(`[BACKEND] ${timestamp}`);
+        console.log(`[BACKEND] MQTT RX [${topic}]: ${message.toString()}`);
+        console.log('========================================');
+
+        try {
+            const data = JSON.parse(message.toString());
+            const commandTopic = process.env.MEDICINE_COMMAND_TOPIC || 'medicine/command';
+
+            // Handle command from frontend (has timestamp, no status, no type=command_ack)
+            // Also ignore messages we already processed (source: 'backend')
+            if (topic === COMMAND_TOPIC && data.timestamp && !data.status && data.type !== 'command_ack' && data.source !== 'backend') {
+                console.log(`[BACKEND] Command for slot ${data.slot} from frontend`);
+
+                // Add source to prevent loop when we re-publish
+                const payload = JSON.stringify({ slot: data.slot, timestamp: data.timestamp, source: 'backend' });
+                client.publish(COMMAND_TOPIC, payload); // ESP32 listens on this too
+
+                // Send acknowledge back to frontend via separate topic (avoid loop)
+                const ack = { type: 'command_ack', slot: data.slot, status: 'sent', timestamp: new Date().toISOString() };
+                client.publish(COMMAND_ACK_TOPIC, JSON.stringify(ack));
+
+                console.log(`[BACKEND] Forwarded command to ESP32`);
+                return;
+            }
+
+            // Handle status from ESP32 (has status field)
+            if (data.status) {
+                console.log(`[BACKEND] Slot: ${data.slot}, Status: ${data.status}`);
+
+                // Save to database
+                const db = require('../database/db');
+                await db.logMedicine(data.slot, data.status, data.message || null);
+                await db.updateSystemStatus('esp32', 'online', 'ESP32 connected');
+                console.log('[BACKEND] Saved to DB');
+
+                // Publish log update to frontend
+                const logUpdate = {
+                    slot: data.slot,
+                    status: data.status,
+                    message: data.message,
+                    time: new Date().toISOString()
+                };
+                require('./mqttClient').publishLogUpdate(logUpdate);
+            }
+
+        } catch (error) {
+            console.error('[BACKEND] Error:', error.message);
+        }
+    });
+
+    client.on('error', (err) => {
+        console.error('[BACKEND] MQTT Error:', err.message);
+    });
+
+    client.on('offline', () => {
+        console.log('[BACKEND] MQTT Offline');
+    });
+
+    return client;
+}
+
+function publishCommand(slot) {
+    const commandTopic = process.env.MEDICINE_COMMAND_TOPIC || 'medicine/command';
+    const payload = JSON.stringify({ slot, timestamp: new Date().toISOString() });
+
+    if (client && client.connected) {
+        console.log('');
+        console.log('========================================');
+        console.log(`[BACKEND] MQTT TX: ${payload}`);
+        console.log(`[BACKEND] Sending command for slot ${slot}`);
+        console.log('========================================');
+
+        client.publish(commandTopic, payload);
+        return true;
+    } else {
+        console.error('[BACKEND] MQTT not connected');
+        return false;
+    }
+}
+
+function getClient() {
+    return client;
+}
+
+function isConnected() {
+    return client && client.connected;
+}
+
+// Publish log update to notify frontend of DB changes
+function publishLogUpdate(log) {
+    const logsTopic = process.env.MEDICINE_LOGS_TOPIC || 'medicine/logs';
+    const payload = JSON.stringify({
+        type: 'log',
+        data: log,
+        timestamp: new Date().toISOString()
+    });
+
+    if (client && client.connected) {
+        client.publish(logsTopic, payload);
+        console.log(`[BACKEND] Published log update: slot ${log.slot}, status ${log.status}`);
+    }
+}
+
+module.exports = {
+    init,
+    publishCommand,
+    publishLogUpdate,
+    getClient,
+    isConnected
+};
+</file>
+
+<file path="backend/package.json">
+{
+  "name": "medicine-dispenser-backend",
+  "version": "1.0.0",
+  "description": "Backend for medicine dispenser IoT system",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mqtt": "^5.3.4",
+    "socket.io": "^4.7.4",
+    "mysql2": "^3.9.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.1"
+  }
+}
+</file>
+
+<file path="backend/README.md">
+# Backend API Documentation
+
+## Base URL
+`http://localhost:3000`
+
+## API Endpoints
+
+### 1. Phát thuốc
+```
+POST /api/medicine/dispense
+Content-Type: application/json
+
+Body:
+{
+    "slot": 1  // hoặc 2
+}
+
+Response:
+{
+    "success": true,
+    "message": "Đã gửi lệnh phát thuốc số 1"
+}
+```
+
+### 2. Lấy lịch sử phát thuốc
+```
+GET /api/medicine/logs?limit=50
+```
+
+### 3. Lấy trạng thái hệ thống
+```
+GET /api/medicine/status
+```
+
+### 4. Lưu lệnh giọng nói
+```
+POST /api/medicine/voice
+Content-Type: application/json
+
+Body:
+{
+    "command": "Uống thuốc sáng",
+    "slot": 1,
+    "confidence": 0.95
+}
+```
+
+### 5. Health Check
+```
+GET /health
+```
+
+## Socket.io Events
+
+### Client listening:
+- `medicine:status` - Trạng thái phát thuốc
+- `medicine:logs` - Lịch sử phát thuốc
+- `system:status` - Trạng thái hệ thống
+- `mqtt:status` - Trạng thái MQTT
+
+### Client emitting:
+- `request:initial-data` - Yêu cầu dữ liệu ban đầu
+
+## MQTT Topics
+
+### Subscribe
+- `medicine/status` - Nhận trạng thái từ ESP32
+
+### Publish
+- `medicine/command` - Gửi lệnh tới ESP32
+
+## Cài đặt
+
+```bash
+cd backend
+npm install
+cp .env.example .env
+# Chỉnh sửa .env với thông tin MySQL và MQTT broker
+npm start
+```
+</file>
+
+<file path="backend/routes/medicine.js">
+const express = require('express');
+const router = express.Router();
+const mqttClient = require('../mqtt/mqttClient');
+const db = require('../database/db');
+
+// Voice API server URL
+const VOICE_API_URL = 'http://localhost:8765/record';
+
+// POST /api/medicine/listen - Nghe và nhận diện giọng nói
+router.post('/listen', async (req, res) => {
+    try {
+        // Call voice API server
+        const response = await fetch(VOICE_API_URL, {
+            method: 'POST'
+        });
+
+        const result = await response.json();
+
+        if (result.error) {
+            throw new Error(result.error);
+        }
+
+        // Publish to MQTT if slot detected
+        if (result.slot) {
+            mqttClient.publishCommand(result.slot);
+        }
+
+        res.json({
+            success: true,
+            data: result
+        });
+    } catch (error) {
+        console.error('Voice listen error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// POST /api/medicine/dispense - Phát thuốc
+router.post('/dispense', async (req, res) => {
+    try {
+        const { slot } = req.body;
+
+        // Validate slot
+        if (!slot || (slot !== 1 && slot !== 2)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Slot phải là 1 hoặc 2'
+            });
+        }
+
+        // Publish MQTT command
+        const published = mqttClient.publishCommand(slot);
+
+        if (published) {
+            res.json({
+                success: true,
+                message: `Đã gửi lệnh phát thuốc số ${slot}`
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                error: 'Không thể kết nối MQTT broker'
+            });
+        }
+    } catch (error) {
+        console.error('Dispense error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// GET /api/medicine/logs - Lấy lịch sử phát thuốc
+router.get('/logs', async (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 50;
+        const logs = await db.getLogs(limit);
+        res.json({ success: true, data: logs });
+    } catch (error) {
+        console.error('Get logs error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// GET /api/medicine/stats - Lấy thống kê phát thuốc theo ngày trong tháng
+router.get('/stats', async (req, res) => {
+    try {
+        const stats = await db.getDailyStats();
+        res.json({ success: true, data: stats });
+    } catch (error) {
+        console.error('Get stats error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// GET /api/medicine/status - Lấy trạng thái hệ thống
+router.get('/status', async (req, res) => {
+    try {
+        const status = await db.getSystemStatus();
+        res.json({ success: true, data: status });
+    } catch (error) {
+        console.error('Get status error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// POST /api/medicine/voice - Lưu lệnh giọng nói
+router.post('/voice', async (req, res) => {
+    try {
+        const { command, slot, confidence } = req.body;
+
+        if (!command || !slot) {
+            return res.status(400).json({
+                success: false,
+                error: 'Thiếu command hoặc slot'
+            });
+        }
+
+        const sql = 'INSERT INTO voice_commands (command_text, slot, confidence) VALUES (?, ?, ?)';
+        await db.query(sql, [command, slot, confidence || 1.0]);
+
+        res.json({ success: true, message: 'Đã lưu lệnh giọng nói' });
+    } catch (error) {
+        console.error('Voice command error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+module.exports = router;
+</file>
+
+<file path="backend/server.js">
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const mqttClient = require('./mqtt/mqttClient');
+const medicineRoutes = require('./routes/medicine');
+
+const app = express();
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Routes
+app.use('/api/medicine', medicineRoutes);
+
+// Health check
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Initialize MQTT (sẽ emit events)
+mqttClient.init();
+
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
+
+module.exports = app;
+</file>
+
+<file path="docs/project-overview-pdr.md">
+# Medicine Dispenser - Project Overview and PDR
+
+## 1. Project Overview
+
+### Project Name
+**Medicine Dispenser** (Máy Phát Thuốc Tự Động)
+
+### Project Type
+IoT-enabled medicine dispensing system with voice control
+
+### Core Functionality
+An automated two-slot medicine dispenser controlled via web interface and voice commands. The system integrates ESP32 hardware with a Node.js/Express backend and React frontend to provide real-time medicine dispensing control, tracking, and statistics.
+
+### Target Users
+- Patients who need automated medication reminders
+- Caregivers monitoring elderly or ill patients
+- Medical facilities requiring automated dispensing
+
+---
+
+## 2. Product Development Requirements (PDR)
+
+### 2.1 Functional Requirements
+
+#### FR-001: Medicine Dispensing Control
+- **Description**: Users must be able to dispense medicine from two slots (Slot 1: Thuốc Ho/Cough Medicine, Slot 2: Thuốc Sốt/Fever Medicine)
+- **Priority**: High
+- **Acceptance Criteria**:
+  - API endpoint `/api/medicine/dispense` accepts POST with `{ slot: 1|2 }`
+  - MQTT command published to `medicine/command` topic
+  - ESP32 receives command and activates servo motor
+
+#### FR-002: Real-time Status Updates
+- **Description**: System must provide real-time status updates via MQTT
+- **Priority**: High
+- **Acceptance Criteria**:
+  - MQTT topics: `medicine/status`, `medicine/logs`, `medicine/command`
+  - Frontend receives status within 2 seconds of action
+
+#### FR-003: Activity/History Logging
+- **Description**: All dispense events must be logged with timestamps and status
+- **Priority**: High
+- **Acceptance Criteria**:
+  - Logs stored in `medicine_logs` table
+  - API endpoint `/api/medicine/logs` returns history
+  - Display shows pending/success/error status
+
+#### FR-004: 30-Day Statistics
+- **Description**: Daily dispensing statistics must be available for 30 days
+- **Priority**: Medium
+- **Acceptance Criteria**:
+  - API endpoint `/api/medicine/stats` returns daily counts
+  - Frontend displays ApexCharts bar chart
+  - Separate counts for slot 1 and slot 2
+
+#### FR-005: System Status Monitoring
+- **Description**: Real-time monitoring of system components
+- **Priority**: Medium
+- **Acceptance Criteria**:
+  - API endpoint `/api/medicine/status` returns component states
+  - Components tracked: esp32, mqtt, servo1, servo2, ir_sensor
+
+#### FR-006: Voice Control - Web Speech API
+- **Description**: Voice command recognition using browser Web Speech API
+- **Priority**: Medium
+- **Acceptance Criteria**:
+  - Language set to Vietnamese (vi-VN)
+  - Recognized commands trigger dispense action
+  - Visual feedback during listening
+
+#### FR-007: Voice Control - Backend Whisper
+- **Description**: Backend voice recognition via external API
+- **Priority**: Low
+- **Acceptance Criteria**:
+  - POST `/api/medicine/listen` calls external voice API
+  - Returns recognized slot and confidence score
+
+#### FR-008: Offline Support
+- **Description**: Application must work offline with cached data
+- **Priority**: Medium
+- **Acceptance Criteria**:
+  - localStorage caches logs and stats
+  - UI displays cached data when offline
+
+### 2.2 Non-Functional Requirements
+
+#### NFR-001: Performance
+- **Response Time**: API responses within 500ms
+- **MQTT Latency**: End-to-end command under 2 seconds
+
+#### NFR-002: Reliability
+- **Uptime**: 99% during operation hours
+- **Error Handling**: All errors logged with meaningful messages
+
+#### NFR-003: Security
+- **Input Validation**: All API inputs validated
+- **Environment Variables**: Sensitive data in .env files
+
+#### NFR-004: Maintainability
+- **Modular Architecture**: Separate backend/frontend/ESP32 firmware
+- **Logging**: Consistent logging format across all modules
+
+---
+
+## 3. Technical Stack
+
+| Layer | Technology | Version |
+|-------|-------------|---------|
+| Backend Runtime | Node.js | 18.x+ |
+| Backend Framework | Express.js | 4.18.2 |
+| Frontend Framework | React | 18.2.0 |
+| Real-time Communication | MQTT | 5.3.4 |
+| Database | MySQL (mysql2) | 8.x |
+| Charts | ApexCharts | - |
+| IoT Device | ESP32 | - |
+| Firmware | Arduino | - |
+
+---
+
+## 4. Database Schema
+
+### Tables
+- `medicine_logs`: Dispense history
+- `system_status`: Component states
+- `voice_commands`: Voice command history
+
+---
+
+## 5. MQTT Topics
+
+| Topic | Direction | Purpose |
+|-------|------------|---------|
+| `medicine/status` | ESP32 → Backend | Device status updates |
+| `medicine/logs` | Backend → Frontend | Real-time log notifications |
+| `medicine/command` | Frontend/Backend → ESP32 | Dispense commands |
+
+---
+
+## 6. API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/medicine/dispense` | Dispense medicine (slot 1 or 2) |
+| GET | `/api/medicine/logs` | Get medicine history |
+| GET | `/api/medicine/stats` | Get daily statistics |
+| GET | `/api/medicine/status` | Get system status |
+| POST | `/api/medicine/voice` | Save voice command |
+| POST | `/api/medicine/listen` | Voice recognition |
+| GET | `/health` | Health check |
+
+---
+
+## 7. Acceptance Criteria Summary
+
+| ID | Feature | Success Condition |
+|----|---------|-------------------|
+| AC-1 | Dispense Slot 1 | Command sent to ESP32, servo activates |
+| AC-2 | Dispense Slot 2 | Command sent to ESP32, servo activates |
+| AC-3 | Real-time Updates | Frontend receives status within 2s |
+| AC-4 | View History | Logs displayed with correct status |
+| AC-5 | View Statistics | 30-day chart displays correctly |
+| AC-6 | Voice Control | Vietnamese voice triggers dispense |
+| AC-7 | Offline Mode | App loads cached data when offline |
+
+---
+
+## 8. Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0.0 | 2026-05-20 | Initial PDR |
+
+---
+
+*Document Created: 2026-05-20*
+</file>
+
+<file path="example.py">
+"""
+Voice-controlled medicine dispenser.
+
+- Interactive mode: press ENTER to record.
+- Server mode: POST /record for the backend/frontend flow.
+- API mode: record once and print a JSON result.
+"""
+
+import argparse
+import difflib
+import json
+import os
+import sys
+import time
+import unicodedata
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+
+SAMPLE_RATE = 16000
+DURATION = int(os.environ.get("VOICE_DURATION", "7"))
+AUDIO_FILE = Path(__file__).parent / "record.wav"
+INPUT_DEVICE = os.environ.get("VOICE_INPUT_DEVICE") or None
+API_HOST = os.environ.get("VOICE_API_HOST", "localhost")
+API_PORT = int(os.environ.get("VOICE_API_PORT", "8765"))
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
+WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "localhost")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
+MQTT_VOICE_TOPIC = os.environ.get("MQTT_VOICE_TOPIC", "medicine/voice")
+
+
+KEYWORDS = [
+    ("thuốc ho", 1),
+    ("thuốc sốt", 2),
+    ("ho", 1),
+    ("sốt", 2),
+    ("cough", 1),
+    ("fever", 2),
+    ("medicine", 1),
+    ("give me medicine", 1),
+]
+
+
+try:
+    import paho.mqtt.client as mqtt
+
+    MQTT_AVAILABLE = True
+except ImportError:
+    MQTT_AVAILABLE = False
+
+
+mqtt_client = None
+mqtt_connected = False
+
+
+def mqtt_on_connect(client, userdata, flags, rc):
+    global mqtt_connected
+    mqtt_connected = rc == 0
+    if mqtt_connected:
+        print("[MQTT] Connected")
+    else:
+        print(f"[MQTT] Connection failed: {rc}")
+
+
+def init_mqtt():
+    if not MQTT_AVAILABLE:
+        print("[MQTT] paho-mqtt is not installed; skipping MQTT publish")
+        return None
+
+    client = mqtt.Client()
+    client.on_connect = mqtt_on_connect
+
+    try:
+        client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        client.loop_start()
+        time.sleep(0.5)
+        return client
+    except Exception as exc:
+        print(f"[MQTT] Error: {exc}")
+        return None
+
+
+def normalize_text(text: str) -> str:
+    text = text.lower().strip()
+    text = unicodedata.normalize("NFC", text)
+    return " ".join(text.split())
+
+
+def is_match(text: str, keyword: str, threshold: float = 0.75) -> bool:
+    text = normalize_text(text)
+    keyword = normalize_text(keyword)
+
+    if keyword in text:
+        return True
+
+    words = text.split()
+    keyword_len = len(keyword.split())
+
+    for index in range(len(words) - keyword_len + 1):
+        phrase = " ".join(words[index : index + keyword_len])
+        ratio = difflib.SequenceMatcher(None, phrase, keyword).ratio()
+
+        if ratio >= threshold:
+            print(f"Gần khớp: '{phrase}' ~ '{keyword}' ({ratio:.2f})")
+            return True
+
+    return False
+
+
+def detect_keyword(text: str) -> tuple[int | None, str | None]:
+    normalized = normalize_text(text)
+
+    for keyword, slot in KEYWORDS:
+        if is_match(normalized, keyword):
+            return slot, keyword
+
+    return None, None
+
+
+def load_whisper_model():
+    from faster_whisper import WhisperModel
+
+    return WhisperModel(
+        WHISPER_MODEL,
+        device=WHISPER_DEVICE,
+        compute_type=WHISPER_COMPUTE_TYPE,
+    )
+
+
+def record_and_transcribe(model) -> str:
+    import numpy as np
+    import sounddevice as sd
+    from scipy.io.wavfile import write
+
+    print(f"Đang ghi âm {DURATION} giây...")
+
+    kwargs = {
+        "samplerate": SAMPLE_RATE,
+        "channels": 1,
+        "dtype": "int16",
+    }
+
+    if INPUT_DEVICE is not None:
+        kwargs["device"] = int(INPUT_DEVICE) if INPUT_DEVICE.isdigit() else INPUT_DEVICE
+        print(f"Using input device: {INPUT_DEVICE}")
+
+    audio = sd.rec(int(DURATION * SAMPLE_RATE), **kwargs)
+    sd.wait()
+
+    max_val = np.abs(audio).max()
+    if max_val > 0 and max_val < 500:
+        gain = min(5000 / max_val, 10)
+        audio = (audio * gain).clip(-32768, 32767).astype(np.int16)
+        print(f"Amplified by {gain:.1f}x")
+
+    write(AUDIO_FILE, SAMPLE_RATE, audio)
+    print("Đang nhận diện giọng nói...")
+
+    segments, _ = model.transcribe(
+        str(AUDIO_FILE),
+        language="vi",
+        beam_size=5,
+        vad_filter=False,
+    )
+
+    transcript = " ".join(segment.text for segment in segments)
+    return normalize_text(transcript)
+
+
+def clean_up():
+    try:
+        if AUDIO_FILE.exists():
+            AUDIO_FILE.unlink()
+    except OSError:
+        pass
+
+
+def publish_result(slot: int | None, transcript: str, matched_keyword: str | None = None):
+    payload = {
+        "type": "voice_command",
+        "slot": slot,
+        "matched_keyword": matched_keyword,
+        "transcript": transcript,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+    print("\n---RESULT---")
+    print(json.dumps(payload, ensure_ascii=False))
+    print("---END---\n")
+
+    if mqtt_client and mqtt_connected:
+        mqtt_client.publish(MQTT_VOICE_TOPIC, json.dumps(payload, ensure_ascii=False))
+        print("[MQTT] Published")
+
+
+def handle_record(model) -> dict:
+    transcript = record_and_transcribe(model)
+    slot, matched_keyword = detect_keyword(transcript)
+
+    print("=" * 40)
+    print("Bạn nói:", transcript)
+
+    if slot:
+        print(f"Phát hiện: {matched_keyword} -> Slot {slot}")
+    else:
+        print("Không có từ khóa phù hợp.")
+
+    publish_result(slot, transcript, matched_keyword)
+    clean_up()
+
+    return {
+        "transcript": transcript,
+        "slot": slot,
+        "matched_keyword": matched_keyword,
+    }
+
+
+def run_once(model):
+    try:
+        return handle_record(model)
+    except Exception as exc:
+        clean_up()
+        print(f"Error: {exc}", file=sys.stderr)
+        return {"error": str(exc)}
+
+
+def run_interactive(model):
+    try:
+        import readchar
+    except ImportError:
+        print("Thiếu thư viện readchar. Cài bằng: pip install readchar")
+        return
+
+    print("\n=== Voice Medicine Controller ===")
+    print("Từ khóa: 'thuốc ho'/'ho' -> Slot 1, 'thuốc sốt'/'sốt' -> Slot 2")
+    print("Nhấn ENTER để ghi âm, ESC hoặc Ctrl+C để thoát.\n")
+
+    while True:
+        try:
+            sys.stdout.write("> ")
+            sys.stdout.flush()
+            key = readchar.readkey()
+
+            if key in ("\r", "\n"):
+                print()
+                run_once(model)
+            elif key in ("\x1b", "\x03"):
+                print("\nQuit")
+                break
+        except KeyboardInterrupt:
+            print("\nQuit")
+            break
+
+
+def run_server(model):
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path != "/record":
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Not found"}).encode("utf-8"))
+                return
+
+            try:
+                result = handle_record(model)
+                status = 200
+            except Exception as exc:
+                clean_up()
+                result = {"error": str(exc)}
+                status = 500
+
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps(result, ensure_ascii=False).encode("utf-8"))
+
+        def log_message(self, format, *args):
+            return
+
+    print("=== Voice API Server ===")
+    print(f"Server ready on http://{API_HOST}:{API_PORT}/record")
+    server = HTTPServer((API_HOST, API_PORT), Handler)
+    server.serve_forever()
+
+
+def main():
+    global mqtt_client
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--api", action="store_true", help="Record once and print JSON")
+    parser.add_argument("--server", action="store_true", help="Run HTTP voice server")
+    args = parser.parse_args()
+
+    mqtt_client = init_mqtt()
+
+    print(f"Loading Whisper model: {WHISPER_MODEL}...")
+    model = load_whisper_model()
+    print("Ready!")
+
+    try:
+        if args.server:
+            run_server(model)
+        elif args.api:
+            run_once(model)
+        else:
+            run_interactive(model)
+    finally:
+        if mqtt_client:
+            mqtt_client.disconnect()
+        clean_up()
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="frontend/.env">
+# Frontend Environment
+REACT_APP_API_URL=http://localhost:3000
+REACT_APP_MQTT_URL=mqtt://localhost:1883
+</file>
+
+<file path="frontend/.gitignore">
+.claude
+/node_modules/
+</file>
+
+<file path="frontend/package.json">
+{
+  "name": "medicine-dispenser-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "apexcharts": "^5.12.0",
+    "mqtt": "^5.3.4",
+    "react": "^18.2.0",
+    "react-apexcharts": "^2.1.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
+    "recharts": "^3.8.1"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}
+</file>
+
+<file path="frontend/public/index.html">
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#4CAF50" />
+    <meta name="description" content="Hệ thống phát thuốc thông minh" />
+    <title>Hộp Thuốc Thông Minh</title>
+  </head>
+  <body>
+    <noscript>Bạn cần bật JavaScript để chạy ứng dụng này</noscript>
+    <div id="root"></div>
+  </body>
+</html>
+</file>
+
+<file path="frontend/public/manifest.json">
+{
+  "short_name": "Hộp Thuốc",
+  "name": "Hệ thống phát thuốc thông minh",
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#4CAF50",
+  "background_color": "#ffffff"
+}
+</file>
+
+<file path="frontend/README.md">
+# Frontend - Medicine Dispenser Dashboard
+
+## Tổng quan
+
+Đây là giao diện web dashboard cho he thong phat thuoc tu dong su dung ESP32. Ung dung cho phep:
+
+- Theo doi trang thai theo thoi gian thuc (realtime)
+- Dieu khien phat thuoc bang nut bam tren giao dien
+- Dieu khien bang cam bien cam ung (TTP224) tren thiet bi ESP32
+- Nhan dang giong noi tieng Viet (Web Speech API)
+- Xem lich su phat thuoc
+
+## Tinh nang
+
+- Dashboard realtime hien thi trang thai he thong
+- Dieu khien phat thuoc bang nut bam
+- Nhan dang giong noi tieng Viet (Web Speech API)
+- Hien thi lich su phat thuoc realtime
+- Trang thai ESP32, MQTT, Stepper Motor, IR Sensor
+- Cam bien cam ung TTP224 (4 nut)
+
+## Cai dat
+
+### Yeu cuu he thong
+
+- Node.js 14+ (khuyen nghi Node.js 18+)
+- npm hoac yarn
+- Trinh duyet Chrome, Edge, hoac Firefox
+
+### Buoc cai dat
+
+```bash
+# 1. Di den thu muc frontend
+cd frontend
+
+# 2. Cai dat cac goi phu thuoc
+npm install
+# hoac
+yarn install
+
+# 3. Chay ung dung
+npm start
+# hoac
+yarn start
+```
+
+ Ung dung se chay tai dia chi: `http://localhost:3000`
+
+## Cau hinh
+
+### Bien moi truong
+
+Tao file `.env` neu can thay doi URL backend:
+
+```bash
+# File .env
+REACT_APP_API_URL=http://localhost:3000
+REACT_APP_WS_URL=ws://localhost:3000
+```
+
+### Cau hinh WebSocket
+
+Ung dung su dung Socket.io de nhan du lieu realtime. Dam bao backend co ho tro Socket.io.
+
+## Phan cung
+
+### So do ket noi ESP32
+
+```
++------------------+     +------------------+
+|   NGAN A        |     |   NGAN B        |
+|  [Thuoc]       |     |  [Thuoc]       |
+|    v            |     |    v            |
+| +----------+  |     | +----------+  |
+| | Stepper  |--+----->| | Stepper  |  |
+| | 28BYJ-48|  |     | | 28BYJ-48|  |
+| | +ULN2003|  |     | | +ULN2003|  |
+| +----------+  |     | +----------+  |
+|    v            |     |    v            |
+| +----------+  |     | +----------+  |
+| |  IR SENSOR|<----->|  IR SENSOR |
+| +----------+  |     | +----------+  |
++------------------+     +------------------+
+        |                       |
+        +--------+---------------+
+                 |
+           +----+----+
+           | ESP32 |
+           |       |
+           |GPIO34|--> IR A
+           |GPIO35|--> IR B
+           |GPIO26|--> Stepper A IN1
+           |GPIO27|--> Stepper A IN2
+           |GPIO14|--> Stepper A IN3
+           |GPIO12|--> Stepper A IN4
+           |GPIO16|--> Stepper B IN1
+           |GPIO17|--> Stepper B IN2
+           |GPIO 5|--> Stepper B IN3
+           |GPIO18|--> Stepper B IN4
+           |GPIO36|--> TTP224 Touch
+           +--------+
+                 |
+           +----+----+
+           | MQTT |
+           |Broker|
+           +----+----+
+                 |
+           +----+----+
+           |Backend|
+           | API  |
+           +----+----+
+```
+
+### Bang ket noi chi tiet
+
+| Linh kien | Chan ESP32 | Ten chan | Ghi chu |
+|-----------|-----------|----------|---------|
+| **Stepper Motor A (Ngăn A)** | | | Qua ULN2003 |
+| | GPIO 26 | IN1_A | Cuon 1 |
+| | GPIO 27 | IN2_A | Cuon 2 |
+| | GPIO 14 | IN3_A | Cuon 3 |
+| | GPIO 12 | IN4_A | Cuon 4 |
+| **Stepper Motor B (Ngăn B)** | | | Qua ULN2003 |
+| | GPIO 16 | IN1_B | Cuon 1 |
+| | GPIO 17 | IN2_B | Cuon 2 |
+| | GPIO 5 | IN3_B | Cuon 3 |
+| | GPIO 18 | IN4_B | Cuon 4 |
+| **IR Sensor A** | GPIO 34 | IR1_PIN | Cam bien van chan hong ngoai |
+| **IR Sensor B** | GPIO 35 | IR2_PIN | Cam bien van chan hong ngoai |
+| **TTP224 Touch** | GPIO 36 | TOUCH_PIN | Cam bien cam ung 4 nut |
+
+### Thong so ky thuat
+
+#### ESP32
+- **Model**: ESP32-WROOM-32
+- **CPU**: Dual-core Xtensa LX6, 240MHz
+- **RAM**: 512KB
+- **Flash**: 4MB
+- **Wi-Fi**: 802.11 b/g/n, 2.4GHz
+- **Bluetooth**: v4.2 BR/EDR, BLE
+- **Dien ap hoat dong**: 3.3V
+
+#### Stepper Motor 28BYJ-48
+- **Hãng sản xuất**: 28BYJ-48
+- **Điện áp hoạt động**: 5V DC
+- **Số pha**: 4
+- **Tỷ số giảm tốc**: 1:64
+- **Số bước/1 vòng**: 2048 bước (512 x 4)
+- **Mô-men xoắn**: 0.08 Nm
+- **Tốc độ**: 10-15 RPM
+- **Dòng điện/pha**: 92mA
+
+#### Module ULN2003
+- **Điện áp đầu vào**: 5V-12V DC
+- **Dòng ra tối đa**: 500mA mỗi kênh
+- **Số kênh**: 7 kênh đầu ra
+- **Tương thích**: 28BYJ-48, các động cơ bước 5V
+
+#### IR Sensor (GP2Y0A21YK)
+- **Điện áp hoạt động**: 4.5V-5.5V DC
+- **Khoảng cách phát hiện**: 10-80cm
+- **Điện áp đầu ra**: 0.4V-2.5V (tương ứng khoảng cách)
+- **Tín hiệu đầu ra**: Analog
+
+#### TTP224 Touch Sensor
+- **Điện áp hoạt động**: 2.5V-5.5V DC
+- **Số nút**: 4 nút cảm ứng điện dung
+- **Độ nhạy**: Có thể điều chỉnh
+- **Đầu ra**: Digital (HIGH khi chạm)
+- **Khoảng cách phát hiện**: Không tiếp xúc, chạm nhẹ
+
+## Touch Buttons (TTP224)
+
+| Nút | Chan | Chuc nang | Mo ta |
+|-----|------|-----------|-------|
+| 1 | - | Nhả thuốc ngăn A | Xoay đĩa đưa 1 viên thuốc ngăn A ra cổng xả |
+| 2 | - | Nhả thuốc ngăn B | Xoay đĩa đưa 1 viên thuốc ngăn B ra cổng xả |
+| 3 | - | Reset hệ thống | Khởi động lại trạng thái FSM |
+| 4 | - | (Reserved) | Dự phòng cho tính năng mở rộng |
+
+## Voice Commands
+
+Các lệnh giọng nói được hỗ trợ khi bấm nút microphone:
+
+| Lệnh | Hành động |
+|------|----------|
+| "Uống thuốc" | Phát thuốc số 1 |
+| "Thuốc" | Phát thuốc số 1 |
+| "Thuốc 1" | Phát thuốc số 1 |
+| "Cho tôi thuốc 1" | Phát thuốc số 1 |
+| "Thuốc 2" | Phát thuốc số 2 |
+| "Cho tôi thuốc 2" | Phát thuốc số 2 |
+
+**Lưu ý**: Web Speech API chỉ hỗ trợ tiếng Anh mặc định trên Chrome. Để nhận dạng tiếng Việt, cần sử dụng backend xử lý hoặc API bên thứ 3 (Google Speech-to-Text, Azure Speech).
+
+## State Machine
+
+### Sơ đồ trạng thái
+
+```
+                    +------------------+
+                    |                  |
+   +--------+      |     RECEIVE      |      +----------+
+   |        |      |     COMMAND     |      |          |
+   |  IDLE  |------|                  |------| DISPENSE |
+   |        |      |                  |      |          |
+   +--------+      +------------------+      +----+-----+
+        ^                                          |
+        |                                          v
+   +--------+      +------------------+      +----------+
+   |        |      |                  |      |          |
+   | SUCCESS|<-----|   WAIT_SENSOR    |------|  ERROR   |
+   |        |      |                  |      |          |
+   +--------+      +------------------+      +----------+
+```
+
+### Mo ta trang thai
+
+| Trang thai | Ma | Mo ta |
+|------------|-----|-------|
+| IDLE | 0 | Cho lenh tu MQTT, Touch Button, hoac Voice |
+| DISPENSE | 1 | Xoay stepper day thuoc ra cong xa |
+| WAIT_SENSOR | 2 | Cho IR sensor phat hien thuoc roi (timeout 3s) |
+| SUCCESS | 3 | IR detect thanh cong -> gui MQTT status |
+| ERROR | 2 | Timeout hoac khong detect -> bao loi |
+
+### Luong hoat dong
+
+1. **Khoi dong**:
+   - Ket noi Wi-Fi
+   - Ket noi MQTT broker
+   - Khoi tao stepper ve vi tri ban dau
+   - In trang thai len Serial
+
+2. **Trong trang thai IDLE**:
+   - Doc cam bien IR lien tuc
+   - Doc cam bien cam ung TTP224
+   - Kiem tra MQTT neu co lenh moi
+   - Xu ly lenh nhan duoc
+
+3. **Khi nhan lenh phat thuoc**:
+   - Chuyen sang trang thai DISPENSE
+   - Xoay stepper tuong ung (512 steps = 1/4 vong)
+   - Mo dong relay servo (neu co)
+   - Chuyen sang WAIT_SENSOR
+
+4. **Khi cho IR sensor**:
+   - Doc gia tri IR lien tuc
+   - Neu IR < nguong (2000) -> phat hien thuoc -> SUCCESS
+   - Neu timeout 3s -> ERROR
+
+5. **Khi hoan thanh**:
+   - Publish trang thai len MQTT topic `medicine/status`
+   - Reset bien, quy ve IDLE
+
+## MQTT Topics
+
+### Topic dong
+
+| Topic | Description | Payload |
+|-------|-------------|---------|
+| `medicine/command` | Lenh gui toi ESP32 | `{"slot": 1}` hoac `{"slot": 2}` |
+| `medicine/status` | Trang thai tu ESP32 | Xem ben duoi |
+
+### Status Payload
+
+```json
+{
+  "slot": 1,
+  "status": "success",
+  "ir_triggered": true
+}
+```
+
+Cac gia tri status:
+- `"success"`: Phat thuoc thanh cong
+- `"no_pill_detected"`: Khong phat hien thuoc roi
+- `"system_reset"`: He thong duoc reset
+- `"error"`: Loi khac
+
+## API Endpoints
+
+### Backend API
+
+Ung dung goi API toi backend:
+
+| Method | Endpoint | Description |
+|--------|----------|------------|
+| GET | `/api/medicine/logs` | Lay lich su phat thuoc |
+| GET | `/api/medicine/status` | Lay trang thai hien tai |
+| POST | `/api/medicine/dispense` | Phat thuoc (body: `{slot: 1\|2}`) |
+
+## WebSocket Events
+
+### Client lang nghe
+
+| Event | Description |
+|-------|-------------|
+| `medicine:status` | Trang thai phat thuoc cap nhat |
+| `medicine:logs` | Lich su phat thuoc cap nhat |
+| `system:status` | Trang thai he thong |
+| `mqtt:status` | Trang thai MQTT |
+
+### Client gui
+
+| Event | Description |
+|-------|-------------|
+| `request:initial-data` | Yeu cau du lieu ban dau |
+
+## Xuat hien loi va cach khac phuc
+
+### Loi thuong gap
+
+| Loi | Nguyen nhan | Cach khac phuc |
+|-----|-------------|----------------|
+| Khong ket noi duoc Wi-Fi | Sai ten Wi-Fi hoac mat khau | Kiem tra cau hinh `WIFI_SSID`, `WIFI_PASSWORD` |
+| Khong ket noi MQTT | MQTT broker khong chay | Kiem tra MQTT broker da khoi dong |
+| IR khong phat hien thuoc | Cam bien khong dung vi tri | Dieu chinh vi tri cam bien |
+| Stepper khong quay | Day ket noi loi | Kiem tra day ULN2003 |
+| Touch Button khong phan ung | Cam bien TTP224 loi | Kiem tra nguon 5V |
+
+### Kiem tra trang thai
+
+Mo Serial Monitor (9600 baud) de xem log:
+
+```
+===== Medicine Dispenser - Stepper v1.0 =====
+Connecting WiFi: Ret.....
+WiFi OK!
+IP: 192.168.1.100
+MQTT connecting to 172.20.10.2:1883
+MQTT Connected!
+State: IDLE -> DISPENSE
+=> DISPENSE SLOT: 1
+=> STEPPER A DISPENSED
+=== Stepper done, waiting sensor ===
+IR1: 1500 IR2: 4095 Detected: YES
+State: WAIT_SENSOR -> SUCCESS
+Published: {"slot":1,"status":"success","ir_triggered":true}
+State: SUCCESS -> IDLE
+```
+
+## Bao tri
+
+### Bao tri dinh ky
+
+- **Hang tuan**: Kiem tra trang thai hoat dong, lam sach IR sensor
+- **Hang thang**: Kiem tra day ket noi, bo loc bui
+- **Hang quy**: Thay the linh kien hong neu can
+
+### Thay the linh kien
+
+1. **Stepper Motor**: Thay the khi keu to, rung nhieu
+2. **IR Sensor**: Thay the khi doc sai gia tri
+3. **TTP224**: Thay the khi khong phan ung
+
+## Mo rong he thong
+
+### Them nhieu ngăn thuốc
+
+1. Them stepper motor + IR sensor
+2. Cap nhat code: tang so luong slot
+3. Cap nhat MQTT topic
+
+### Them MQTT Integration
+
+1. Cau hình MQTT broker (cloud/neu)
+2. Cap nhat MQTT_SERVER trong code
+3. Them authentication neu can
+
+### Them IoT Dashboard
+
+1. Su dung Home Assistant
+2. Su dung Node-RED
+3. Su dung custom dashboard
+
+## Giao diện nguoi dung
+
+### Man hinh chinh
+
+- Hien thi trang thai: IDLE, DISPENSE, SUCCESS, ERROR
+- 2 nut bam: "Nhả thuốc A", "Nhả thuốc B"
+- Nut microphone cho voice command
+- Lich su phat thuoc (realtime)
+
+### Trang thai hien thi
+
+- Do xanh: Hoat dong binh thuong
+- Do cam: Warning/Error
+- Xanh la: Thanh cong
+
+## Gop y
+
+Neu co thac mac hoac can ho tro, vui long:
+- Tao issue tren GitHub
+- Lien he qua email
+
+## License
+
+MIT License
+
+## Tac gia
+
+- Developer: [Ten]
+- Version: 1.0.0
+- Ngay tao: 2024
+</file>
+
+<file path="frontend/src/App.js">
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import Chart from 'react-apexcharts';
+import mqtt from 'mqtt';
+import { Card, CardHeader } from './components/shadcn/components';
+import { Button, LogItem, EmptyState, ActivityLog, VoiceButton } from './components/shadcn/components';
+
+const MQTT_URL = process.env.REACT_APP_MQTT_URL || 'mqtt://localhost:1883';
+const STATUS_TOPIC = 'medicine/status';
+const LOGS_TOPIC = 'medicine/logs';
+const COMMAND_TOPIC = 'medicine/command';
+const COMMAND_ACK_TOPIC = 'medicine/command/ack';
+
+const getSlotName = (slot) => (slot === 1 ? 'Thuốc Ho' : slot === 2 ? 'Thuốc Sốt' : `Slot ${slot}`);
+
+// LocalStorage keys
+const STORAGE_KEYS = {
+  logs: 'medicine_logs',
+  stats: 'medicine_stats',
+  lastUpdate: 'medicine_last_update',
+};
+
+// Load from localStorage
+const loadFromStorage = (key) => {
+  try {
+    const data = localStorage.getItem(key);
+    return data ? JSON.parse(data) : null;
+  } catch {
+    return null;
+  }
+};
+
+// Save to localStorage
+const saveToStorage = (key, data) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(data));
+    localStorage.setItem(STORAGE_KEYS.lastUpdate, Date.now());
+  } catch {
+    // Silent fail - storage might be full
+  }
+};
+
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+if (SpeechRecognition) {
+  recognition = new SpeechRecognition();
+  recognition.continuous = false;
+  recognition.lang = 'vi-VN';
+  recognition.interimResults = false;
+}
+
+function App() {
+  const [logs, setLogs] = useState(() => loadFromStorage(STORAGE_KEYS.logs) || []);
+  const [mqttStatus, setMqttStatus] = useState({ connected: false, offline: !navigator.onLine });
+  const [espStatus, setEspStatus] = useState({ connected: false, lastSeen: null });
+  const [dispensing, setDispensing] = useState({ 1: false, 2: false });
+  const [listening, setListening] = useState(false);
+  const [voiceTranscript, setVoiceTranscript] = useState('');
+  const [activityLog, setActivityLog] = useState([]);
+  const [dailyStats, setDailyStats] = useState(() => loadFromStorage(STORAGE_KEYS.stats) || []);
+
+  const clientRef = useRef(null);
+  const dispatchRef = useRef({ lastTime: { 1: 0, 2: 0 } });
+
+  // Helper to add log
+  const addLog = useCallback((msg) => {
+    const timestamp = new Date().toLocaleTimeString();
+    setActivityLog((prev) => [`[${timestamp}] ${msg}`, ...prev].slice(0, 20));
+  }, []);
+
+  // Connect MQTT
+  useEffect(() => {
+    const client = mqtt.connect(MQTT_URL);
+
+    client.on('connect', () => {
+      addLog('FRONTEND: MQTT Connected');
+      setMqttStatus({ connected: true });
+      client.subscribe(STATUS_TOPIC);
+      client.subscribe(LOGS_TOPIC);
+      // Don't subscribe to COMMAND_TOPIC - we only publish to it
+      // Subscribe to ack topic instead
+      client.subscribe(COMMAND_ACK_TOPIC);
+    });
+
+    client.on('message', (topic, message) => {
+      try {
+        const data = JSON.parse(message.toString());
+        addLog(`FRONTEND: RX ${JSON.stringify(data)}`);
+
+        // Track ESP32 status
+        if (topic === STATUS_TOPIC && (data.type === 'status' || data.device === 'esp32')) {
+          setEspStatus({ connected: true, lastSeen: new Date() });
+        }
+
+        // Handle real-time log updates from DB
+        if (topic === LOGS_TOPIC && data.type === 'log') {
+          addLog(`FRONTEND: DB Update - slot ${data.data.slot} ${data.data.status}`);
+
+          // Update pending log to success (or add new if no pending exists)
+          setLogs((prev) => {
+            const pendingIndex = prev.findIndex(
+              (log) => log.slot === data.data.slot && log.status === 'pending'
+            );
+            if (pendingIndex >= 0) {
+              // Convert pending to the actual status from ESP32
+              const updated = [...prev];
+              updated[pendingIndex] = data.data;
+              return updated;
+            }
+            return [data.data, ...prev].slice(0, 50);
+          });
+        }
+
+        // Add log to history (update pending to success)
+        if (data.status && topic === STATUS_TOPIC) {
+          setLogs((prev) => {
+            const pendingIndex = prev.findIndex(
+              (log) => log.slot === data.slot && log.status === 'pending'
+            );
+            if (pendingIndex >= 0) {
+              const updated = [...prev];
+              updated[pendingIndex] = { slot: data.slot, status: data.status, message: data.message, time: new Date().toISOString() };
+              return updated;
+            }
+            return [data, ...prev];
+          });
+        }
+
+        // Handle command response (backend confirms command sent)
+        if (topic === COMMAND_ACK_TOPIC && data.type === 'command_ack') {
+          addLog(`FRONTEND: Command ${data.slot} acknowledged - ${data.status}`);
+          setDispensing((prev) => ({ ...prev, [data.slot]: false }));
+        }
+      } catch (e) {
+        addLog(`FRONTEND: Parse error - ${e.message}`);
+      }
+    });
+
+    client.on('error', (err) => {
+      addLog(`FRONTEND: MQTT Error - ${err.message}`);
+      setMqttStatus({ connected: false });
+    });
+
+    client.on('offline', () => {
+      addLog('FRONTEND: MQTT Offline');
+      setMqttStatus({ connected: false });
+    });
+
+    clientRef.current = client;
+
+    return () => {
+      client.end();
+    };
+  }, [addLog]);
+
+  // Fetch initial history from API (fallback)
+  useEffect(() => {
+    const fetchHistory = async () => {
+      try {
+        const res = await fetch('http://localhost:3000/api/medicine/logs');
+        const json = await res.json();
+        if (json.success && json.data) {
+          setLogs(json.data);
+          addLog('FRONTEND: Initial history loaded');
+        }
+      } catch (e) {
+        // Silent fail - MQTT will provide updates
+      }
+    };
+
+    fetchHistory();
+
+    // Request history via MQTT (backend will respond on logs topic)
+    const client = clientRef.current;
+    if (client && client.connected) {
+      client.publish(LOGS_TOPIC, JSON.stringify({ type: 'history_request' }));
+    }
+
+    // Periodic refresh as fallback (every 60s)
+    const interval = setInterval(fetchHistory, 60000);
+    return () => clearInterval(interval);
+  }, [addLog]);
+
+  // Fetch daily stats for chart
+  useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        const res = await fetch('http://localhost:3000/api/medicine/stats');
+        const json = await res.json();
+        if (json.success && json.data) {
+          const formatted = json.data.map((d) => ({
+            ...d,
+            date: new Date(d.date).toLocaleDateString('vi-VN', { day: 'numeric', month: 'numeric' }),
+          }));
+          setDailyStats(formatted);
+        }
+      } catch (e) {
+        console.log('Stats fetch error:', e.message);
+      }
+    };
+
+    fetchStats();
+    const interval = setInterval(fetchStats, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Persist logs to localStorage when updated
+  useEffect(() => {
+    if (logs.length > 0) {
+      saveToStorage(STORAGE_KEYS.logs, logs);
+    }
+  }, [logs]);
+
+  // Persist stats to localStorage when updated
+  useEffect(() => {
+    if (dailyStats.length > 0) {
+      saveToStorage(STORAGE_KEYS.stats, dailyStats);
+    }
+  }, [dailyStats]);
+
+  // Track online/offline status
+  useEffect(() => {
+    const handleOnline = () => {
+      setMqttStatus((prev) => ({ ...prev, offline: false }));
+      addLog('FRONTEND: Online');
+    };
+    const handleOffline = () => {
+      setMqttStatus((prev) => ({ ...prev, offline: true }));
+      addLog('FRONTEND: Offline - using cached data');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [addLog]);
+
+  // Check ESP32 online status
+  useEffect(() => {
+    const checkEspStatus = () => {
+      if (espStatus.lastSeen) {
+        const elapsed = Date.now() - espStatus.lastSeen.getTime();
+        if (elapsed > 15000) {
+          setEspStatus((prev) => ({ ...prev, connected: false }));
+        }
+      }
+    };
+
+    const interval = setInterval(checkEspStatus, 5000);
+    return () => clearInterval(interval);
+  }, [espStatus.lastSeen]);
+
+  // Auto-timeout: fail pending logs after 10 seconds
+  useEffect(() => {
+    const timeout = setInterval(() => {
+      setLogs((prev) =>
+        prev.map((log) => {
+          if (log.status === 'pending') {
+            const elapsed = Date.now() - new Date(log.time).getTime();
+            if (elapsed > 60000) {
+              addLog(`FRONTEND: Timeout - slot ${log.slot} no response`);
+              return { ...log, status: 'error', message: 'ESP32 không phản hồi' };
+            }
+          }
+          return log;
+        })
+      );
+    }, 1000);
+    return () => clearInterval(timeout);
+  }, [addLog]);
+
+  // Dispense
+  const dispense = useCallback(
+    async (slot) => {
+      // Small debounce: ignore clicks within 500ms per slot
+      const now = Date.now();
+      if (dispatchRef.current.lastTime[slot] && now - dispatchRef.current.lastTime[slot] < 500) {
+        addLog(`FRONTEND: Debounce ignored click getSlotName(slot)`);
+        return;
+      }
+      dispatchRef.current.lastTime[slot] = now;
+
+      // If same slot is currently dispensing, wait for it to finish first
+      if (dispensing[slot]) {
+        addLog(`FRONTEND: ${getSlotName(slot)} busy, waiting...`);
+        // Wait up to 30 seconds for current operation to finish
+        for (let i = 0; i < 30 && dispensing[slot]; i++) {
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        if (dispensing[slot]) {
+          addLog(`FRONTEND: Timeout waiting for getSlotName(slot)`);
+          return;
+        }
+        // After waiting, mark as dispensing and add pending log
+        setDispensing((prev) => ({ ...prev, [slot]: true }));
+        const pendingLog = { slot, status: 'pending', time: new Date().toISOString() };
+        setLogs((prev) => [pendingLog, ...prev].slice(0, 50));
+        addLog(`FRONTEND: Sending queued command getSlotName(slot)...`);
+      } else {
+        // Not busy
+        setDispensing((prev) => ({ ...prev, [slot]: true }));
+        const pendingLog = { slot, status: 'pending', time: new Date().toISOString() };
+        setLogs((prev) => [pendingLog, ...prev].slice(0, 50));
+        addLog(`FRONTEND: Sending MQTT command getSlotName(slot)...`);
+      }
+
+      // Send via MQTT instead of HTTP
+      const client = clientRef.current;
+      if (client && client.connected) {
+        const payload = JSON.stringify({ slot, timestamp: new Date().toISOString() });
+        client.publish(COMMAND_TOPIC, payload);
+        addLog(`FRONTEND: Published to ${COMMAND_TOPIC}`);
+        // Don't set dispensing false yet - wait for ESP32 response
+      } else {
+        // Fallback to HTTP if MQTT not connected
+        try {
+          await fetch('http://localhost:3000/api/medicine/dispense', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slot }),
+          });
+        } catch (error) {
+          setLogs((prev) =>
+            prev.map((log) =>
+              log.slot === slot && log.status === 'pending'
+                ? { ...log, status: 'error', message: error.message }
+                : log
+            )
+          );
+          addLog(`FRONTEND: Error - ${error.message}`);
+        }
+        setDispensing((prev) => ({ ...prev, [slot]: false }));
+      }
+    },
+    [addLog]
+  );
+
+  // Voice - use backend whisper
+  const startListening = useCallback(async () => {
+    if (listening) return;
+    setListening(true);
+    setVoiceTranscript('Đang nghe...');
+    addLog('FRONTEND: Requesting voice from backend...');
+
+    try {
+      const response = await fetch('http://localhost:3000/api/medicine/listen', {
+        method: 'POST',
+      });
+      const data = await response.json();
+
+      if (data.success && data.data) {
+        const { transcript, slot } = data.data;
+        setVoiceTranscript(transcript);
+
+        if (slot) {
+          addLog(`FRONTEND: Backend result - "${transcript}" -> getSlotName(slot)`);
+          await dispense(slot);
+          setVoiceTranscript(`Đã phát thuốc số ${slot}`);
+        } else {
+          setVoiceTranscript(`Không hiểu: ${transcript}`);
+        }
+      }
+    } catch (error) {
+      addLog(`FRONTEND: Voice error - ${error.message}`);
+      setVoiceTranscript('Lỗi kết nối');
+    }
+
+    setTimeout(() => setListening(false), 2000);
+  }, [addLog, listening]);
+
+  const handleVoiceResult = useCallback(
+    async (event) => {
+      const transcript = event.results[0][0].transcript;
+      addLog(`FRONTEND: Voice result - "${transcript}"`);
+      setVoiceTranscript(transcript);
+
+      const text = transcript.toLowerCase();
+      let slot = null;
+      if (text.includes('thuốc 1') || text.includes('1')) slot = 1;
+      else if (text.includes('thuốc 2') || text.includes('2')) slot = 2;
+      else if (text.includes('thuốc')) slot = 1;
+
+      if (slot) {
+        dispense(slot);
+        setVoiceTranscript(`Đã phát thuốc số ${slot}`);
+      } else {
+        setVoiceTranscript(`Không hiểu: ${transcript}`);
+      }
+      setTimeout(() => setListening(false), 2000);
+    },
+    [dispense, addLog]
+  );
+
+  const handleVoiceError = useCallback(
+    (event) => {
+      addLog(`FRONTEND: Voice error - ${event.error}`);
+      setListening(false);
+    },
+    [addLog]
+  );
+
+  useEffect(() => {
+    if (recognition) {
+      recognition.onresult = handleVoiceResult;
+      recognition.onerror = handleVoiceError;
+      recognition.onend = () => setListening(false);
+    }
+  }, [handleVoiceResult, handleVoiceError]);
+
+  const formatTime = (t) => (t ? new Date(t).toLocaleString('vi-VN') : new Date().toLocaleString('vi-VN'));
+
+  return (
+    <div id="app">
+      <header className="header">
+        <h1>Hộp Thuốc Thông Minh</h1>
+        <p>MQTT Realtime {mqttStatus.offline && <span className="offline-badge">Ngoại tuyến</span>}</p>
+      </header>
+
+      <div className="container">
+        {/* Control */}
+        <div className="dashboard">
+          <Card>
+            <CardHeader title="Điều Khiển" />
+            <div className="control-buttons">
+              <Button variant="primary" onClick={() => dispense(1)} disabled={dispensing[1]}>
+                Phát Thuốc Ho
+              </Button>
+              <Button variant="secondary" onClick={() => dispense(2)} disabled={dispensing[2]}>
+                Phát Thuốc Sốt
+              </Button>
+            </div>
+            {listening && (
+              <div className="voice-status">{voiceTranscript}</div>
+            )}
+            {recognition && (
+              <VoiceButton listening={listening} onClick={startListening} disabled={listening} />
+            )}
+          </Card>
+        </div>
+
+        {/* Stats Chart */}
+        <Card>
+          <CardHeader title="Thống Kê 30 Ngày" />
+          {dailyStats.length === 0 ? (
+            <EmptyState message="Chưa có dữ liệu" />
+          ) : (
+            <div className="chart-container">
+              <Chart
+                type="bar"
+                height={300}
+                options={{
+                  chart: {
+                    type: 'bar',
+                    stacked: true,
+                    background: 'transparent',
+                    toolbar: { show: false },
+                    animations: { enabled: true, speed: 800 },
+                    fontFamily: 'inherit',
+                  },
+                  plotOptions: {
+                    bar: {
+                      horizontal: false,
+                      columnWidth: '70%',
+                      borderRadius: 4,
+                      distributed: false,
+                      rangeBarGroupRows: false,
+                    },
+                  },
+                  colors: ['#fbbf24', '#60a5fa'],
+                  grid: {
+                    borderColor: 'rgba(255,255,255,0.05)',
+                    strokeDashArray: 3,
+                    yaxis: { lines: { show: true } },
+                    xaxis: { lines: { show: false } },
+                  },
+                  xaxis: {
+                    categories: dailyStats.map(d => d.date),
+                    labels: {
+                      style: { colors: '#94a3b8', fontSize: '12px' },
+                    },
+                    axisBorder: { show: false },
+                    axisTicks: { show: false },
+                    tickPlacement: 'between',
+                  },
+                  yaxis: {
+                    labels: {
+                      style: { colors: '#94a3b8', fontSize: '12px' },
+                    },
+                    tickAmount: 5,
+                    forceNiceTicks: true,
+                    min: 0,
+                    decimalsInFloat: false,
+                  },
+                  tooltip: {
+                    theme: 'dark',
+                    style: { fontSize: '12px' },
+                    y: {
+                      formatter: (val) => Number(val) || 0,
+                    },
+                  },
+                  legend: {
+                    position: 'top',
+                    horizontalAlign: 'right',
+                    fontSize: '12px',
+                    markers: { radius: 4 },
+                    labels: { colors: '#94a3b8' },
+                    itemMargin: { horizontal: 12 },
+                  },
+                  dataLabels: { enabled: false },
+                  stroke: { show: true, width: 0 },
+                  states: {
+                    hover: { filter: { type: 'brighten', value: 0.15 } },
+                  },
+                }}
+                series={[
+                  { name: 'Thuốc Ho', data: dailyStats.map(d => d.slot1) },
+                  { name: 'Thuốc Sốt', data: dailyStats.map(d => d.slot2) },
+                ]}
+              />
+            </div>
+          )}
+        </Card>
+
+        {/* Logs */}
+        <Card>
+          <CardHeader title="Lịch Sử Phát Thuốc" />
+          {logs.length === 0 ? (
+            <EmptyState message="Chưa có lịch sử" />
+          ) : (
+            <div className="btn-list">
+              {logs.map((log, i) => (
+                <LogItem key={i} slot={log.slot} time={formatTime(log.time)} status={log.status} />
+              ))}
+            </div>
+          )}
+        </Card>
+
+        {/* System Log */}
+        <Card>
+          <CardHeader title="System Log" />
+          <ActivityLog logs={activityLog} />
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+export default App;
+</file>
+
+<file path="frontend/src/components/shadcn/components.js">
+// ============================================================================
+// shadcn-inspired Component Library
+// Maintains the existing dark/neon cyber aesthetic
+// ============================================================================
+
+import React from 'react';
+
+// -----------------------------------------------------------------------------
+// Card Component
+// -----------------------------------------------------------------------------
+export function Card({ children, className = '', style = {} }) {
+  return (
+    <div
+      className={className}
+      style={{
+        background: 'var(--bg-card)',
+        backdropFilter: 'blur(20px)',
+        border: '1px solid var(--glass-border)',
+        borderRadius: 16,
+        padding: '20px 22px',
+        position: 'relative',
+        overflow: 'hidden',
+        transition: 'all 0.25s ease',
+        ...style,
+      }}
+    >
+      {/* Top border highlight */}
+      <div
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: 1,
+          background: 'linear-gradient(90deg, transparent, var(--glass-highlight), transparent)',
+          opacity: 0.5,
+        }}
+      />
+      {children}
+    </div>
+  );
+}
+
+// CardHeader
+export function CardHeader({ title, icon }) {
+  return (
+    <h2
+      style={{
+        fontSize: '0.8rem',
+        fontWeight: 500,
+        color: 'var(--text-secondary)',
+        textTransform: 'uppercase',
+        letterSpacing: '0.12em',
+        marginBottom: 16,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+      }}
+    >
+      {/* Indicator dot */}
+      <span
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: 2,
+          background: 'var(--neon-amber)',
+          boxShadow: '0 0 10px var(--neon-amber-glow)',
+          display: 'inline-block',
+        }}
+      />
+      {title}
+    </h2>
+  );
+}
+
+// CardContent
+export function CardContent({ children }) {
+  return <div>{children}</div>;
+}
+
+// -----------------------------------------------------------------------------
+// Button Component
+// -----------------------------------------------------------------------------
+export function Button({
+  children,
+  variant = 'primary',
+  size = 'default',
+  disabled = false,
+  onClick,
+  className = '',
+  style = {},
+}) {
+  const baseStyle = {
+    flex: 1,
+    minWidth: 130,
+    padding: '16px 24px',
+    border: 'none',
+    borderRadius: 12,
+    fontSize: '0.9rem',
+    fontWeight: 600,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    position: 'relative',
+    overflow: 'hidden',
+    opacity: disabled ? 0.5 : 1,
+    ...style,
+  };
+
+  const variants = {
+    primary: {
+      background: 'var(--gradient-amber)',
+      color: '#000',
+      boxShadow: '0 4px 16px rgba(245, 158, 11, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.2)',
+    },
+    secondary: {
+      background: 'var(--gradient-blue)',
+      color: '#fff',
+      boxShadow: '0 4px 16px rgba(59, 130, 246, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.15)',
+    },
+    ghost: {
+      background: 'var(--glass-bg)',
+      border: '1px solid var(--glass-border)',
+      color: 'var(--text-secondary)',
+    },
+    outline: {
+      background: 'transparent',
+      border: '1px solid var(--glass-border)',
+      color: 'var(--text-secondary)',
+    },
+  };
+
+  const handleMouseEnter = (e) => {
+    if (disabled) return;
+    if (variant === 'primary') {
+      e.target.style.transform = 'translateY(-2px)';
+      e.target.style.boxShadow = '0 8px 24px rgba(245, 158, 11, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.2)';
+    } else if (variant === 'secondary') {
+      e.target.style.transform = 'translateY(-2px)';
+      e.target.style.boxShadow = '0 8px 24px rgba(59, 130, 246, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.15)';
+    } else if (variant === 'ghost' || variant === 'outline') {
+      e.target.style.background = 'rgba(139, 92, 246, 0.1)';
+      e.target.style.borderColor = 'var(--neon-purple)';
+      e.target.style.color = 'var(--neon-purple)';
+    }
+  };
+
+  const handleMouseLeave = (e) => {
+    if (disabled) return;
+    e.target.style.transform = 'translateY(0)';
+    if (variant === 'ghost' || variant === 'outline') {
+      e.target.style.background = 'var(--glass-bg)';
+      e.target.style.borderColor = 'var(--glass-border)';
+      e.target.style.color = 'var(--text-secondary)';
+    }
+  };
+
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={className}
+      style={{ ...baseStyle, ...variants[variant] }}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+    >
+      {children}
+    </button>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Badge Component
+// -----------------------------------------------------------------------------
+export function Badge({ children, variant = 'default', className = '' }) {
+  const variants = {
+    default: {
+      background: 'var(--glass-bg)',
+      color: 'var(--text-secondary)',
+    },
+    success: {
+      background: 'var(--neon-green-dim)',
+      color: 'var(--neon-green)',
+    },
+    error: {
+      background: 'var(--neon-red-dim)',
+      color: 'var(--neon-red)',
+    },
+    warning: {
+      background: 'var(--neon-amber-dim)',
+      color: 'var(--neon-amber)',
+    },
+    purple: {
+      background: 'var(--neon-purple-dim)',
+      color: 'var(--neon-purple)',
+    },
+  };
+
+  return (
+    <span
+      className={className}
+      style={{
+        padding: '4px 10px',
+        borderRadius: 6,
+        fontSize: '0.7rem',
+        fontWeight: 600,
+        fontFamily: "'JetBrains Mono', monospace",
+        textTransform: 'uppercase',
+        letterSpacing: '0.05em',
+        display: 'inline-block',
+        ...variants[variant],
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// StatusDot Component
+// -----------------------------------------------------------------------------
+export function StatusDot({ online, className = '' }) {
+  return (
+    <span
+      className={className}
+      style={{
+        width: 10,
+        height: 10,
+        borderRadius: '50%',
+        background: online ? 'var(--neon-green)' : 'var(--neon-red)',
+        boxShadow: online
+          ? '0 0 12px var(--neon-green-glow)'
+          : '0 0 8px var(--neon-red-dim)',
+        animation: online ? 'pulse-online 2s ease-in-out infinite' : 'none',
+      }}
+    />
+  );
+}
+
+// -----------------------------------------------------------------------------
+// StatusItem Component
+// -----------------------------------------------------------------------------
+export function StatusItem({ label, online }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '14px 16px',
+        background: 'var(--glass-bg)',
+        border: '1px solid var(--glass-border)',
+        borderRadius: 10,
+        transition: 'all 0.2s ease',
+      }}
+    >
+      <StatusDot online={online} />
+      <span
+        style={{
+          fontSize: '0.85rem',
+          fontWeight: 500,
+          color: 'var(--text-primary)',
+        }}
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// LogItem Component
+// -----------------------------------------------------------------------------
+const getSlotName = (slot) => (slot === 1 ? 'Thuốc Ho' : slot === 2 ? 'Thuốc Sốt' : `Slot ${slot}`);
+
+export function LogItem({ slot, time, status }) {
+  const statusVariant = {
+    success: 'success',
+    fail: 'error',
+    'no-pill-detected': 'warning',
+    pending: 'warning',
+  };
+
+  const statusLabels = {
+    success: 'OK',
+    fail: 'Lỗi',
+    'no-pill-detected': 'None',
+    pending: 'Đợi...',
+  };
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: '14px 16px',
+        background:
+          status === 'success'
+            ? 'var(--neon-green-dim)'
+            : status === 'pending'
+              ? 'rgba(251, 191, 36, 0.1)'
+              : status === 'fail'
+                ? 'var(--neon-red-dim)'
+                : 'var(--neon-amber-dim)',
+        border: '1px solid var(--glass-border)',
+        borderRadius: 10,
+        borderLeft: `3px solid ${
+          status === 'success'
+            ? 'var(--neon-green)'
+            : status === 'pending'
+              ? 'var(--neon-amber)'
+              : status === 'fail'
+                ? 'var(--neon-red)'
+                : 'var(--neon-amber)'
+        }`,
+        transition: 'all 0.2s ease',
+      }}
+    >
+      <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: '0.9rem' }}>
+        {getSlotName(slot)}
+      </span>
+      <span
+        style={{
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: '0.7rem',
+          color: 'var(--text-muted)',
+        }}
+      >
+        {time}
+      </span>
+      <Badge variant={statusVariant[status]}>{statusLabels[status]}</Badge>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// EmptyState Component
+// -----------------------------------------------------------------------------
+export function EmptyState({ message }) {
+  return (
+    <div
+      style={{
+        textAlign: 'center',
+        padding: '40px 20px',
+        color: 'var(--text-muted)',
+        fontSize: '0.85rem',
+      }}
+    >
+      {message}
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// ActivityLog Component
+// -----------------------------------------------------------------------------
+export function ActivityLog({ logs }) {
+  return (
+    <div
+      style={{
+        background: '#0a0a0e',
+        border: '1px solid var(--glass-border)',
+        borderRadius: 10,
+        padding: 14,
+        fontFamily: "'JetBrains Mono', monospace",
+        fontSize: '0.7rem',
+        color: 'var(--neon-green)',
+        maxHeight: 140,
+        overflowY: 'auto',
+        lineHeight: 1.7,
+        position: 'relative',
+      }}
+    >
+      {logs.map((log, i) => (
+        <div key={i}>{log}</div>
+      ))}
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// VoiceButton Component
+// -----------------------------------------------------------------------------
+export function VoiceButton({ listening, onClick, disabled }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        background: listening ? 'var(--neon-purple-dim)' : 'var(--glass-bg)',
+        border: '1px solid var(--glass-border)',
+        color: listening ? 'var(--neon-purple)' : 'var(--text-secondary)',
+        width: '100%',
+        marginTop: 14,
+        padding: '16px 24px',
+        borderRadius: 12,
+        fontFamily: "'JetBrains Mono', monospace",
+        fontSize: '0.8rem',
+        letterSpacing: '0.05em',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        transition: 'all 0.25s ease',
+        animation: listening ? 'microphone-pulse 1s ease-in-out infinite' : 'none',
+      }}
+    >
+      🎤 MIC
+    </button>
+  );
+}
+</file>
+
+<file path="frontend/src/index.css">
+/* Premium Cyber-Minimal Dashboard Theme */
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap');
+
+:root {
+  /* Core backgrounds */
+  --bg-primary: #08080c;
+  --bg-secondary: #0f0f14;
+  --bg-tertiary: #141419;
+  --bg-card: rgba(20, 20, 25, 0.85);
+
+  /* Glass effect */
+  --glass-bg: rgba(255, 255, 255, 0.03);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-highlight: rgba(255, 255, 255, 0.12);
+
+  /* Neon accent colors */
+  --neon-amber: #f59e0b;
+  --neon-amber-dim: rgba(245, 158, 11, 0.15);
+  --neon-amber-glow: rgba(245, 158, 11, 0.4);
+
+  --neon-gold: #fbbf24;
+  --neon-gold-dim: rgba(251, 191, 36, 0.12);
+
+  --neon-blue: #3b82f6;
+  --neon-blue-dim: rgba(59, 130, 246, 0.15);
+  --neon-blue-glow: rgba(59, 130, 246, 0.4);
+
+  --neon-green: #10b981;
+  --neon-green-dim: rgba(16, 185, 129, 0.15);
+  --neon-green-glow: rgba(16, 185, 129, 0.4);
+
+  --neon-red: #ef4444;
+  --neon-red-dim: rgba(239, 68, 68, 0.15);
+
+  --neon-purple: #8b5cf6;
+  --neon-purple-dim: rgba(139, 92, 246, 0.15);
+
+  /* Text */
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+
+  /* Gradients */
+  --gradient-amber: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  --gradient-blue: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+  --gradient-control: linear-gradient(135deg, #f59e0b 0%, #f97316 50%, #ef4444 100%);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  position: relative;
+  overflow-x: hidden;
+}
+
+/* Ambient background grid */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+  background-size: 60px 60px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Ambient glow spots */
+body::after {
+  content: '';
+  position: fixed;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(245, 158, 11, 0.06) 0%, transparent 40%),
+    radial-gradient(circle at 80% 80%, rgba(59, 130, 246, 0.05) 0%, transparent 40%),
+    radial-gradient(circle at 60% 30%, rgba(139, 92, 246, 0.04) 0%, transparent 30%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+#root {
+  min-height: 100vh;
+  position: relative;
+  z-index: 1;
+}
+
+/* ===== Header ===== */
+.header {
+  text-align: center;
+  padding: 28px 20px 32px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--glass-border);
+  position: relative;
+}
+
+.header::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 10%;
+  right: 10%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--neon-amber), var(--neon-blue), transparent);
+}
+
+.header h1 {
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, var(--text-primary) 0%, var(--neon-amber) 50%, var(--neon-gold) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin-bottom: 6px;
+}
+
+.header p {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.offline-badge {
+  display: inline-block;
+  background: #fbbf24;
+  color: #1a1a2e;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  margin-left: 8px;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* ===== Container ===== */
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+}
+
+/* ===== Card Base ===== */
+.card {
+  background: var(--bg-card);
+  backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  padding: 20px 22px;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.25s ease;
+}
+
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--glass-highlight), transparent);
+  opacity: 0.5;
+}
+
+.card:hover {
+  border-color: var(--glass-highlight);
+  box-shadow:
+    0 4px 24px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+/* Card titles */
+.card h2 {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.card h2::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--neon-amber);
+  box-shadow: 0 0 10px var(--neon-amber-glow);
+}
+
+/* ===== Dashboard Grid ===== */
+.dashboard {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px;
+  margin-bottom: 24px;
+}
+
+/* ===== Status Grid ===== */
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.status-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  transition: all 0.2s ease;
+}
+
+.status-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* Status dots */
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  position: relative;
+}
+
+.status-dot.online {
+  background: var(--neon-green);
+  box-shadow: 0 0 12px var(--neon-green-glow);
+  animation: pulse-online 2s ease-in-out infinite;
+}
+
+.status-dot.offline {
+  background: var(--neon-red);
+  box-shadow: 0 0 8px var(--neon-red-dim);
+}
+
+@keyframes pulse-online {
+  0%, 100% { opacity: 1; box-shadow: 0 0 12px var(--neon-green-glow); }
+  50% { opacity: 0.7; box-shadow: 0 0 20px var(--neon-green-glow); }
+}
+
+.status-label {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+/* ===== Control Buttons ===== */
+.control-buttons {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.btn {
+  flex: 1;
+  min-width: 130px;
+  padding: 16px 24px;
+  border: none;
+  border-radius: 12px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.1) 0%, transparent 50%);
+  pointer-events: none;
+}
+
+.btn-primary {
+  background: var(--gradient-amber);
+  color: #000;
+  box-shadow:
+    0 4px 16px rgba(245, 158, 11, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow:
+    0 8px 24px rgba(245, 158, 11, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.btn-secondary {
+  background: var(--gradient-blue);
+  color: #fff;
+  box-shadow:
+    0 4px 16px rgba(59, 130, 246, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow:
+    0 8px 24px rgba(59, 130, 246, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ===== Voice Button ===== */
+.voice-btn {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  color: var(--text-secondary);
+  width: 100%;
+  margin-top: 14px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  letter-spacing: 0.05em;
+}
+
+.voice-btn:hover:not(:disabled) {
+  background: rgba(139, 92, 246, 0.1);
+  border-color: var(--neon-purple);
+  color: var(--neon-purple);
+}
+
+.voice-btn.listening {
+  background: var(--neon-purple-dim);
+  border-color: var(--neon-purple);
+  color: var(--neon-purple);
+  animation: microphone-pulse 1s ease-in-out infinite;
+}
+
+@keyframes microphone-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.4); }
+  50% { box-shadow: 0 0 0 12px rgba(139, 92, 246, 0); }
+}
+
+/* ===== Voice Status ===== */
+.voice-status {
+  text-align: center;
+  padding: 14px;
+  background: var(--neon-purple-dim);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  border-radius: 10px;
+  margin-top: 14px;
+  font-size: 0.85rem;
+  color: var(--neon-purple);
+  font-weight: 500;
+}
+
+/* ===== Log List ===== */
+.btn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 280px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* Scrollbar styling */
+.btn-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.btn-list::-webkit-scrollbar-track {
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+}
+
+.btn-list::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 2px;
+}
+
+.log-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  border-left: 3px solid var(--text-muted);
+  transition: all 0.2s ease;
+}
+
+.log-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.log-item.success {
+  border-left-color: var(--neon-green);
+  background: var(--neon-green-dim);
+}
+
+.log-item.fail {
+  border-left-color: var(--neon-red);
+  background: var(--neon-red-dim);
+}
+
+.log-item.no-pill-detected {
+  border-left-color: var(--neon-amber);
+  background: var(--neon-amber-dim);
+}
+
+.log-slot {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.log-time {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.log-status {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.log-status.success {
+  background: var(--neon-green-dim);
+  color: var(--neon-green);
+}
+
+.log-status.fail {
+  background: var(--neon-red-dim);
+  color: var(--neon-red);
+}
+
+.log-status.no-pill-detected {
+  background: var(--neon-amber-dim);
+  color: var(--neon-amber);
+}
+
+/* ===== Activity Log ===== */
+.activity-log {
+  background: #0a0a0e;
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  padding: 14px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--neon-green);
+  max-height: 140px;
+  overflow-y: auto;
+  line-height: 1.7;
+  position: relative;
+}
+
+/* Scanline effect */
+.activity-log::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.1) 2px,
+    rgba(0, 0, 0, 0.1) 4px
+  );
+  pointer-events: none;
+  opacity: 0.3;
+}
+
+.activity-log::-webkit-scrollbar {
+  width: 3px;
+}
+
+.activity-log::-webkit-scrollbar-thumb {
+  background: var(--text-muted);
+  border-radius: 2px;
+}
+
+/* ===== Empty State ===== */
+.empty-state {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+/* ===== Chart Container ===== */
+.chart-container {
+  width: 100%;
+  height: 300px;
+  margin-top: 20px;
+  padding: 0;
+}
+
+/* Recharts fix - prevent axis misalignment */
+.recharts-cartesian-axis-tick-value {
+  text-anchor: middle;
+}
+
+/* Fix XAxis tick centering - ensures ticks align with bar center */
+.recharts-xaxis .recharts-cartesian-axis-tick {
+  transform: translateX(0);
+}
+
+.recharts-xaxis-tick {
+  transform: translateX(0);
+}
+
+/* Force bar rectangles to align with tick positions */
+.recharts-layer.recharts-bar-rectangles {
+  transform: translateX(0);
+}
+
+/* ResponsiveContainer sizing fix for race condition */
+.recharts-responsive-container {
+  overflow: visible;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.recharts-responsive-container svg {
+  overflow: visible;
+}
+
+/* Recharts customizations */
+.recharts-bar-rectangle {
+  transition: all 0.3s ease;
+}
+
+.recharts-bar-rectangle:hover {
+  filter: brightness(1.2);
+  cursor: pointer;
+}
+
+.recharts-tooltip-wrapper {
+  outline: none;
+}
+
+/* ===== Loading ===== */
+.loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 2px solid var(--glass-border);
+  border-top-color: var(--neon-amber);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* ===== Mobile ===== */
+@media (max-width: 600px) {
+  .header h1 {
+    font-size: 1.4rem;
+  }
+
+  .control-buttons {
+    flex-direction: column;
+  }
+
+  .btn {
+    width: 100%;
+  }
+
+  .dashboard {
+    grid-template-columns: 1fr;
+  }
+
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ===== Focus States ===== */
+*:focus-visible {
+  outline: 2px solid var(--neon-blue);
+  outline-offset: 2px;
+}
+
+/* ===== Reduced Motion ===== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+</file>
+
+<file path="frontend/src/index.js">
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+import './index.css';
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+</file>
+
+<file path="run-voice.bat">
+@echo off
+python "%~dp0voice-control.py" --api
+</file>
+
+<file path="SETUP.md">
+# Hộp Thuốc Thông Minh - Setup Guide
+
+## Tổng quan hệ thống
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Frontend  │────▶│   Backend  │────▶│  ESP32 IoT  │
+│  React Web  │     │  Node.js   │     │  Device    │
+│  :3001      │     │  :3000     │     │  MQTT      │
+└─────────────┘     └─────────────┘     └─────────────┘
+       │                   │                   │
+       │            ┌──────┴──────┐            │
+       │            │             │            │
+       │       ┌────▼────┐  ┌───▼────┐ ┌───▼────┐
+       │       │  MySQL   │  │  MQTT  │ │ Voice  │
+       │       │ Database │  │ Broker │ │  API   │
+       │       └─────────┘  └────────┘ └────────┘
+       │
+       │         ┌──────────────────────────┐
+       │         │    Voice Control        │
+       │         │  (Web Speech API)      │
+       │         └──────────────────────────┘
+─────────────────────────────────────────────────
+```
+
+## Yêu cầu hệ thống
+
+- **Node.js**: 18+ (khuyến nghị 20 LTS)
+- **MySQL**: 8.0+ (hoặc MySQL local)
+- **MQTT Broker**: Mosquitto (version 2.0+)
+- **Python**: 3.8+ (cho voice-control.py)
+- **ESP32**: Board ESP32-WROOM-32
+
+## Cài đặt từng bước
+
+### Bước 1: Cài đặt MQTT Broker
+
+#### Windows (sử dụng Chocolatey)
+```powershell
+# Cài đặt Chocolatey nếu chưa có
+Set-ExecutionPolicy Bypass -Scope Process -Force
+iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
+
+# Cài đặt Mosquitto
+choco install mosquitto -y
+```
+
+#### Windows (thủ công)
+```powershell
+# Tải Mosquitto từ https://mosquitto.org/download/
+# Giải nén và thêm vào PATH
+```
+
+#### Khởi động MQTT Broker
+```powershell
+# Tạo file cấu hình mosquitto.conf trong thư mục Mosquitto
+# Nội dung:
+# listener 1883
+# allow_anonymous true
+
+# Chạy Mosquitto
+mosquitto -c mosquitto.conf -v
+```
+
+#### Linux (Ubuntu/Debian)
+```bash
+sudo apt update
+sudo apt install mosquitto mosquitto-clients
+sudo systemctl start mosquitto
+sudo systemctl enable mosquitto
+```
+
+#### Kiểm tra MQTT
+```bash
+# Test subscribe
+mosquitto_sub -t "test"
+
+# Test publish (terminal khác)
+mosquitto_pub -t "test" -m "hello"
+```
+
+---
+
+### Bước 2: Cài đặt MySQL Database
+
+#### Windows (sử dụng XAMPP - khuyến nghị)
+```powershell
+# Tải XAMPP từ https://www.apachefriends.org/
+# Cài đặt và khởi động MySQL
+```
+
+#### Windows (standalone)
+```powershell
+# Tải MySQL Installer từ https://dev.mysql.com/
+# Cài đặt MySQL Server
+```
+
+#### Tạo Database
+
+Chạy file backend/database/schema.sql
+
+---
+
+### Bước 3: Cài đặt Backend
+
+```bash
+# Di chuyển vào thư mục backend
+cd backend
+
+# Cài đặt dependencies
+npm install
+
+# Tạo file .env
+copy .env.example .env
+# Hoặc tạo mới với nội dung:
+```
+
+File `.env` backend:
+```env
+# Database
+DB_HOST=localhost
+DB_USER=root
+DB_PASSWORD=
+DB_NAME=medicine_dispenser
+
+# MQTT Broker
+MQTT_HOST=localhost
+MQTT_PORT=1883
+
+# Server
+PORT=3000
+
+# Voice API (tùy chọn)
+OPENAI_API_KEY=your_key_here
+```
+
+#### Khởi động Backend
+```bash
+npm start
+# Hoặc
+node server.js
+```
+
+Backend chạy tại: `http://localhost:3000`
+
+---
+
+### Bước 4: Cài đặt Frontend
+
+```bash
+# Di chuyển vào thư mục frontend
+cd frontend
+
+# Cài đặt dependencies
+npm install
+
+# Tạo file .env (tùy chọn)
+echo REACT_APP_MQTT_URL=mqtt://localhost:1883 > .env
+```
+
+#### Khởi động Frontend
+```bash
+npm start
+```
+
+Frontend chạy tại: `http://localhost:3001`
+
+---
+
+### Bước 5: Cài đặt ESP32 (Hardware)
+
+#### Linh kiện cần thiết:
+| Linh kiện | Số lượng | Ghi chú |
+|-----------|---------|---------|
+| ESP32-WROOM-32 | 1 | Board chính |
+| Stepper 28BYJ-48 | 2 | Động cơ bước |
+| ULN2003 Driver | 2 | Module điều khiển stepper |
+| IR Sensor (GP2Y0A21YK) | 2 | Cảm biến hồng ngoại |
+| TTP224 Touch | 1 | Cảm biến chạm |
+
+#### Sơ đồ đấu nối:
+
+```
+ESP32 GPIO Map:
+─────────────────────────────
+GPIO 26 → Stepper A IN1
+GPIO 27 → Stepper A IN2
+GPIO 14 → Stepper A IN3
+GPIO 12 → Stepper A IN4
+
+GPIO 16 → Stepper B IN1
+GPIO 17 → Stepper B IN2
+GPIO 05 → Stepper B IN3
+GPIO 18 → Stepper B IN4
+
+GPIO 34 → IR Sensor A (Analog)
+GPIO 35 → IR Sensor B (Analog)
+GPIO 36 → TTP224 Touch
+
+─────────────────────────────
+Nguồn:
+3.3V  → ESP32 VCC
+5V     → ULN2003, IR, TTP224
+GND    → Tất cả GND
+```
+
+#### Nạp code ESP32:
+```bash
+# Mở Arduino IDE
+# Cài đặt thư viện:
+# - PubSubClient
+# - Stepper
+
+# Mở file backend/esp32/medicine_dispenser_fsm/medicine_dispenser_fsm.ino
+# Cấu hình WiFi và MQTT:
+const char* WIFI_SSID = "Your WiFi Name";
+const char* WIFI_PASSWORD = "Your WiFi Password";
+const char* MQTT_SERVER = "192.168.1.X";  // IP của máy chạy MQTT
+
+# Nạp code vào ESP32
+```
+
+---
+
+### Bước 6: Voice Control (Tùy chọn)
+
+```bash
+# Cài đặt Python dependencies
+pip install pyaudio openai whisper
+
+# Hoặc chạy file có sẵn
+python voice-control.py --server
+```
+
+---
+
+## Kiểm tra hệ thống
+
+### 1. Kiểm tra MQTT
+```bash
+# Subscribe to all topics
+mosquitto_sub -t "medicine/#" -v
+
+# Publish test command
+mosquitto_pub -t "medicine/command" -m '{"slot":1}'
+```
+
+### 2. Kiểm tra Backend API
+```powershell
+# Health check
+Invoke-WebRequest -Uri http://localhost:3000/health
+
+# Get logs
+Invoke-WebRequest -Uri http://localhost:3000/api/medicine/logs
+
+# Dispense
+Invoke-WebRequest -Uri http://localhost:3000/api/medicine/dispense -Method POST -ContentType "application/json" -Body '{"slot":1}'
+```
+
+### 3. Kiểm tra Frontend
+Mở trình duyệt tại: `http://localhost:3001`
+
+- Kiểm tra kết nối MQTT (system log hiển thị "MQTT Connected")
+- Nhấn nút "Phát Thuốc Ho" / "Phát Thuốc Sốt"
+- Xem log cập nhật realtime
+
+---
+
+## Chạy nhanh (Quick Start)
+
+```bash
+# 1. Khởi động MQTT
+mosquitto
+
+# 2. Khởi động MySQL (XAMPP)
+# Mở XAMPP Control Panel → Start MySQL
+
+# 3. Terminal mới: Backend
+cd backend && npm start
+
+# 4. Terminal mới: Frontend
+cd frontend && npm start
+
+# 5. Mở trình duyệt
+http://localhost:3001
+```
+
+---
+
+## Cấu trúc dự án
+
+```
+Medicine-Dispenser/
+├── backend/                 # Node.js API server
+│   ├── routes/            # API routes
+│   ├── database/          # Database queries
+│   ├── mqtt/             # MQTT handlers
+│   ├── esp32/            # ESP32 code
+│   ├── .env             # Environment variables
+│   └── server.js         # Main server
+│
+├── frontend/              # React web app
+│   ├── src/
+│   │   ├── App.js       # Main component
+│   │   ├── components/ # UI components
+│   │   └── index.css   # Styles
+│   └── package.json
+│
+├── voice-control.py        # Python voice control
+├── run-voice.bat        # Voice control launcher
+├── SETUP.md            # This file
+└── .gitignore
+```
+
+---
+
+## Thông tin thêm
+
+- **Backend API**: `http://localhost:3000`
+- **Frontend**: `http://localhost:3001`
+- **MQTT**: `mqtt://localhost:1883`
+- **Database**: `localhost:3306`
+
+## License
+
+MIT
+</file>
+
+<file path="voice-control.py">
+"""
+Voice-controlled medicine dispenser
+- Receives audio via MQTT or HTTP from frontend
+- Transcribes speech to text using Faster Whisper
+- Publishes result to MQTT for ESP32
+- Debounce to prevent double trigger
+"""
+
+import sys
+import os
+import json
+import base64
+import difflib
+import readchar
+import unicodedata
+import time
+from pathlib import Path
+
+# Audio config
+SAMPLE_RATE = 16000
+DURATION = int(os.environ.get("VOICE_DURATION", "5"))
+AUDIO_FILE = Path(__file__).parent / "record.wav"
+INPUT_DEVICE = os.environ.get("VOICE_INPUT_DEVICE") or None
+
+# Keywords - order matters (compound first, single chars last)
+KEYWORDS_MAP = {
+    "thuốc ho": 1,
+    "thuốc hò": 1,
+    "thuốc sốt": 2,
+    "sốt": 2,
+    "họ": 1,
+    "hò": 1,
+    # English
+    "medicine": 1,
+    "fever": 2,
+    "cough": 1,
+    "give me medicine": 1,
+}
+
+# MQTT config
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "localhost")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
+MQTT_AUDIO_TOPIC = os.environ.get("MQTT_AUDIO_TOPIC", "medicine/audio")  # frontend -> this
+MQTT_VOICE_TOPIC = os.environ.get("MQTT_VOICE_TOPIC", "medicine/command")  # this -> ESP32
+
+# HTTP API config
+API_HOST = os.environ.get("VOICE_API_HOST", "localhost")
+API_PORT = int(os.environ.get("VOICE_API_PORT", "8765"))
+
+# Whisper config
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
+WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
+
+try:
+    import paho.mqtt.client as mqtt
+    MQTT_AVAILABLE = True
+except ImportError:
+    MQTT_AVAILABLE = False
+
+# Global state - init once
+mqtt_client = None
+mqtt_connected = False
+whisper_model = None  # Load once
+
+# Debounce to prevent double trigger
+last_trigger_time = 0
+DEBOUNCE_SECONDS = 2
+
+
+def mqtt_on_connect(client, userdata, flags, rc):
+    global mqtt_connected
+    if rc == 0:
+        mqtt_connected = True
+        print("[MQTT] Connected")
+        client.subscribe(MQTT_AUDIO_TOPIC)
+        print(f"[MQTT] Subscribed to {MQTT_AUDIO_TOPIC}")
+    else:
+        print(f"[MQTT] Connection failed: {rc}")
+
+
+def mqtt_on_message(client, userdata, msg):
+    """Handle incoming audio from frontend via MQTT"""
+    print(f"[MQTT] Received on {msg.topic}")
+    process_audio_from_mqtt(msg.payload)
+
+
+def process_audio_from_mqtt(payload_bytes):
+    """Process audio data from MQTT message"""
+    try:
+        payload = json.loads(payload_bytes.decode())
+        audio_b64 = payload.get("audio", "")
+        if not audio_b64:
+            print("[MQTT] No audio in payload")
+            return
+
+        audio_data = base64.b64decode(audio_b64)
+        if not audio_data:
+            print("[MQTT] Empty audio data")
+            return
+
+        # Save and process
+        AUDIO_FILE.write_bytes(audio_data)
+        process_audio()
+
+    except Exception as e:
+        print(f"[MQTT] Error: {e}")
+
+
+def process_audio():
+    """Process saved audio file"""
+    global last_trigger_time, whisper_model
+
+    # Debounce check
+    now = time.time()
+    if now - last_trigger_time < DEBOUNCE_SECONDS:
+        print("[SKIP] Debounce - too soon")
+        return
+
+    if not whisper_model:
+        print("[ERROR] Model not loaded")
+        return
+
+    print("Processing audio...")
+
+    transcript = transcribe_audio(whisper_model)
+    slot = detect_keyword(transcript)
+
+    print(f"You said: {transcript}")
+    if slot:
+        print(f"=> Detected: Slot {slot}")
+        # Debounce
+        last_trigger_time = now
+    else:
+        print("=> No keyword detected")
+
+    publish_result(slot, transcript)
+    clean_up()
+
+
+def transcribe_audio(model):
+    """Transcribe saved audio file"""
+    segments, _ = model.transcribe(
+        str(AUDIO_FILE),
+        language="vi",
+        beam_size=2,
+        vad_filter=True,
+    )
+    text = " ".join(s.text for s in segments)
+    return normalize_text(text.strip())
+
+
+def init_mqtt():
+    """Init MQTT - called only once"""
+    global mqtt_client
+    if not MQTT_AVAILABLE:
+        print("[MQTT] paho-mqtt not installed")
+        return None
+
+    if mqtt_client is not None:
+        print("[MQTT] Already initialized")
+        return mqtt_client
+
+    client = mqtt.Client()
+    client.on_connect = mqtt_on_connect
+    client.on_message = mqtt_on_message
+
+    try:
+        client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        client.loop_start()
+        time.sleep(0.5)
+        mqtt_client = client
+        return client
+    except Exception as e:
+        print(f"[MQTT] Error: {e}")
+        return None
+
+
+def remove_tones(text: str) -> str:
+    """Remove Vietnamese tones for matching (hò -> ho, sốt -> sot)"""
+    # Vietnamese tone marks to remove
+    tone_map = {
+        "àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổõộùúủũụưừứửữựỳýỷỹỵđ"
+        "àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổõộùúủũụưừứửữựỳýỷỹỵđ": "",
+    }
+    result = text.lower()
+    for tones, plain in tone_map.items():
+        for char in tones:
+            if char in result:
+                result = result.replace(char, plain)
+    return result
+
+
+def normalize_text(text: str) -> str:
+    """Normalize text for comparison"""
+    text = text.lower().strip()
+    text = unicodedata.normalize("NFC", text)
+    return " ".join(text.split())
+
+
+def is_match(text: str, keyword: str, threshold: float = 0.6) -> bool:
+    """Fuzzy match text with keyword - word based, not substring"""
+    text = normalize_text(text)
+    keyword = normalize_text(keyword)
+
+    # Remove tones for matching (hò -> ho, sốt -> sot)
+    text_no_tone = remove_tones(text)
+    keyword_no_tone = remove_tones(keyword)
+
+    words = text.split()
+    words_no_tone = text_no_tone.split()
+    keyword_words = keyword.split()  # e.g., ["thuốc", "ho"]
+    keyword_words_no_tone = keyword_no_tone.split()
+
+    # Check each keyword word against each text word
+    for i, kw in enumerate(keyword_words):
+        kw_no_tone = keyword_words_no_tone[i]
+        matched = False
+        for j, word in enumerate(words):
+            # Exact match
+            if kw == word:
+                matched = True
+                break
+            # Tone-agnostic match (ho ~ hò, sốt ~ sot)
+            word_no_tone = words_no_tone[j]
+            if kw_no_tone == word_no_tone:
+                print(f"  [Tone] '{word}' ~ '{kw}'")
+                matched = True
+                break
+            # Fuzzy match
+            ratio = difflib.SequenceMatcher(None, word, kw).ratio()
+            if ratio >= threshold:
+                print(f"  [Fuzzy] '{word}' ~ '{kw}' ({ratio:.2f})")
+                matched = True
+                break
+        if not matched:
+            return False
+
+    return True
+
+
+def publish_result(slot: int | None, transcript: str):
+    """Publish result to MQTT"""
+    global mqtt_connected
+
+    if not mqtt_connected or not mqtt_client:
+        print("[MQTT] Not connected")
+        return
+
+    payload = {
+        "type": "voice_command",
+        "slot": slot,
+        "transcript": transcript,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+    print("\n---RESULT---")
+    print(json.dumps(payload, ensure_ascii=False))
+    print("---END---\n")
+
+    mqtt_client.publish(MQTT_VOICE_TOPIC, json.dumps(payload, ensure_ascii=False))
+    print(f"[MQTT] Published to {MQTT_VOICE_TOPIC}")
+
+
+def detect_keyword(text: str) -> int | None:
+    """Detect medicine keyword with fuzzy matching"""
+    normalized = normalize_text(text)
+
+    # Check compound keywords first (higher priority)
+    for keyword, slot in KEYWORDS_MAP.items():
+        if is_match(normalized, keyword):
+            return slot
+
+    return None
+
+
+def clean_up():
+    """Clean up temp files"""
+    try:
+        if AUDIO_FILE.exists():
+            AUDIO_FILE.unlink()
+    except OSError:
+        pass
+
+
+def load_whisper_model():
+    """Load whisper model"""
+    from faster_whisper import WhisperModel
+    return WhisperModel(WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
+
+
+def run_http_server(model):
+    """HTTP server mode - receives audio from frontend"""
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import numpy as np
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path != "/record":
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Not found"}).encode())
+                return
+
+            try:
+                content_length = int(self.headers.get("Content-Length", 0))
+
+                # Check if audio provided in body
+                audio_data = None
+                if content_length > 0:
+                    body = self.rfile.read(content_length)
+                    payload = json.loads(body.decode())
+                    audio_b64 = payload.get("audio", "")
+                    if audio_b64:
+                        audio_data = base64.b64decode(audio_b64)
+
+                # Record from local mic if no audio provided
+                if not audio_data:
+                    print("[HTTP] Recording from local mic...")
+                    import sounddevice as sd
+                    from scipy.io.wavfile import write
+
+                    audio = sd.rec(int(DURATION * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=1, dtype=np.int16)
+                    sd.wait()
+                    write(AUDIO_FILE, SAMPLE_RATE, audio.astype(np.int16))
+                else:
+                    AUDIO_FILE.write_bytes(audio_data)
+
+                process_audio()
+
+                result = {
+                    "transcript": transcribe_audio(model) if AUDIO_FILE.exists() else "",
+                    "slot": detect_keyword(transcribe_audio(model)) if AUDIO_FILE.exists() else None
+                }
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps(result, ensure_ascii=False).encode())
+
+            except Exception as e:
+                print(f"Error: {e}")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+
+        def log_message(self, format, *args):
+            pass
+
+    print("=== Voice API Server ===")
+    print(f"HTTP: http://{API_HOST}:{API_PORT}/record")
+    print(f"MQTT: {MQTT_BROKER}:{MQTT_PORT}")
+    print(f"  Publish: {MQTT_VOICE_TOPIC} (to ESP32)")
+
+    server = HTTPServer((API_HOST, API_PORT), Handler)
+    server.serve_forever()
+
+
+def run_interactive(model):
+    """Interactive mode with local mic"""
+    import sounddevice as sd
+    from scipy.io.wavfile import write
+    import numpy as np
+
+    print("\n=== Voice Medicine Controller ===")
+    print("Keywords: 'thuốc ho'/'ho' -> Slot 1, 'sốt' -> Slot 2")
+    print("Press ENTER to record from local mic...")
+    print("Press ESC or Ctrl+C to quit\n")
+
+    while True:
+        try:
+            sys.stdout.write("> ")
+            sys.stdout.flush()
+            key = readchar.readkey()
+
+            if key in ("\r", "\n"):
+                print()
+                print(f"Recording {DURATION}s from local mic...")
+
+                audio = sd.rec(int(DURATION * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=1, dtype=np.int16)
+                sd.wait()
+                write(AUDIO_FILE, SAMPLE_RATE, audio.astype(np.int16))
+
+                process_audio()
+
+            elif key in ("\x1b", "\x03"):
+                print("\nQuit")
+                break
+
+        except KeyboardInterrupt:
+            print("\nQuit")
+            break
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--server", action="store_true", help="Run HTTP server")
+    args = parser.parse_args()
+
+    global whisper_model
+    global mqtt_client
+
+    print(f"Loading Whisper model: {WHISPER_MODEL}...")
+    whisper_model = load_whisper_model()
+    print("Ready!")
+
+    # Init MQTT ONLY ONCE
+    mqtt_client = init_mqtt()
+
+    if args.server:
+        run_http_server(whisper_model)
+        return
+
+    print("\n=== Listening for audio via MQTT ===")
+    print(f"  Subscribe: {MQTT_AUDIO_TOPIC}")
+    print(f"  Publish:  {MQTT_VOICE_TOPIC}")
+    print(f"  Debounce: {DEBOUNCE_SECONDS}s")
+    print("  Press ENTER to record from local mic")
+    print("  Press ESC to quit\n")
+
+    run_interactive(whisper_model)
+
+    if mqtt_client:
+        mqtt_client.disconnect()
+
+    clean_up()
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+</files>
